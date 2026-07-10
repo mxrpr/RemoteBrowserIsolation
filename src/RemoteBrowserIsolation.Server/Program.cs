@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Hosting.Server;
 using Microsoft.AspNetCore.Hosting.Server.Features;
 using Microsoft.AspNetCore.Http.Extensions;
+using RemoteBrowserIsolation.Server.Models;
 using RemoteBrowserIsolation.Server.Services;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -9,6 +10,7 @@ builder.Services.AddHttpClient<IPageDownloader, PageDownloader>(client =>
 {
     client.Timeout = TimeSpan.FromSeconds(30);
 });
+builder.Services.AddSingleton<IWebRtcSessionManager, WebRtcSessionManager>();
 
 var app = builder.Build();
 
@@ -24,6 +26,24 @@ app.Use(async (context, next) =>
 });
 
 app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
+
+app.MapPost("/api/session/offer", async (OfferRequest request, IWebRtcSessionManager sessionManager) =>
+{
+    if (!Uri.TryCreate(request.Url, UriKind.Absolute, out var targetUrl))
+    {
+        return Results.BadRequest(new { error = "Invalid URL" });
+    }
+
+    try
+    {
+        var answerSdp = await sessionManager.CreateSessionAsync(request.Sdp, targetUrl);
+        return Results.Ok(new AnswerResponse(answerSdp));
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.BadRequest(new { error = ex.Message });
+    }
+});
 
 app.MapGet("/debug/fetch", async (string url, IPageDownloader downloader) =>
 {
