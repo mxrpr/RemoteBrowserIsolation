@@ -1,0 +1,100 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>RBI Test Client</title>
+</head>
+<body>
+  <h1>Remote Browser Isolation - Test Client</h1>
+  <input id="url" type="text" placeholder="https://example.com" size="50" value="https://example.com" />
+  <button id="fetchBtn">Fetch</button>
+  <pre id="log" style="background:#111;color:#0f0;padding:1em;height:200px;overflow:auto"></pre>
+  <h2>Received content</h2>
+  <pre id="content" style="background:#f5f5f5;padding:1em;white-space:pre-wrap;word-break:break-all"></pre>
+
+  <script>
+    const logEl = document.getElementById('log');
+    const contentEl = document.getElementById('content');
+
+    function log(msg) {
+      logEl.textContent += msg + '\n';
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    function waitForIceGatheringComplete(pc) {
+      if (pc.iceGatheringState === 'complete') {
+        return Promise.resolve();
+      }
+      return new Promise((resolve) => {
+        function check() {
+          if (pc.iceGatheringState === 'complete') {
+            pc.removeEventListener('icegatheringstatechange', check);
+            resolve();
+          }
+        }
+        pc.addEventListener('icegatheringstatechange', check);
+      });
+    }
+
+    document.getElementById('fetchBtn').onclick = async () => {
+      const url = document.getElementById('url').value.trim();
+      if (!url) return;
+
+      logEl.textContent = '';
+      contentEl.textContent = '';
+      log('Starting session for ' + url);
+
+      const pc = new RTCPeerConnection();
+
+      // negotiated + fixed id: must match the id the server uses (see WebRtcSessionManager.cs)
+      const channel = pc.createDataChannel('page-content', { negotiated: true, id: 0 });
+      channel.binaryType = 'arraybuffer';
+
+      const chunks = [];
+      let receivedBytes = 0;
+
+      channel.onopen = () => log('Data channel open');
+      channel.onerror = (e) => log('Data channel error: ' + e.error);
+      channel.onclose = () => {
+        log('Data channel closed. Total bytes received: ' + receivedBytes);
+        const blob = new Blob(chunks);
+        blob.text().then((text) => {
+          contentEl.textContent = text;
+        });
+      };
+      channel.onmessage = (event) => {
+        chunks.push(event.data);
+        receivedBytes += event.data.byteLength;
+        log('Received chunk: ' + event.data.byteLength + ' bytes (total ' + receivedBytes + ')');
+      };
+
+      try {
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        await waitForIceGatheringComplete(pc);
+
+        log('Sending offer to server...');
+        const resp = await fetch('/api/session/offer', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url, sdp: pc.localDescription.sdp })
+        });
+
+        if (!resp.ok) {
+          const err = await resp.json();
+          log('Server error: ' + JSON.stringify(err));
+          pc.close();
+          return;
+        }
+
+        const { sdp: answerSdp } = await resp.json();
+        await pc.setRemoteDescription({ type: 'answer', sdp: answerSdp });
+        log('Remote description set, waiting for data...');
+      } catch (e) {
+        log('Error: ' + e.message);
+        pc.close();
+      }
+    };
+  </script>
+</body>
+</html>

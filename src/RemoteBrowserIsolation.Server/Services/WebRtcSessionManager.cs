@@ -13,7 +13,9 @@ public sealed class WebRtcSessionManager(IPageDownloader downloader, ILogger<Web
     {
         var pc = new RTCPeerConnection();
 
-        var dataChannel = await pc.createDataChannel("page-content");
+        // negotiated + fixed id: the client must create its channel with the same id (0) out-of-band,
+        // since the server is the answerer and can't add a new data-channel section via SDP alone.
+        var dataChannel = await pc.createDataChannel("page-content", new RTCDataChannelInit { negotiated = true, id = 0 });
         dataChannel.onopen += () => _ = SendPageAsync(pc, dataChannel, targetUrl);
         dataChannel.onerror += error => logger.LogWarning("Data channel error for {Url}: {Error}", targetUrl, error);
 

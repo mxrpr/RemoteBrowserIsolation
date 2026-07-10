@@ -25,6 +25,9 @@ app.Use(async (context, next) =>
     await next();
 });
 
+app.UseDefaultFiles();
+app.UseStaticFiles();
+
 app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
 
 app.MapPost("/api/session/offer", async (OfferRequest request, IWebRtcSessionManager sessionManager) =>
