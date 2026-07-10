@@ -1,0 +1,6 @@
+@RemoteBrowserIsolation.Server_HostAddress = http://localhost:5139
+
+GET {{RemoteBrowserIsolation.Server_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
