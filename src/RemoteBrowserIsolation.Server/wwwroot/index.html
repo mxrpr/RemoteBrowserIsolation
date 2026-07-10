@@ -4,13 +4,14 @@
   <meta charset="utf-8" />
   <title>RBI Test Client</title>
   <style>
-    /* Full-window layout: a slim toolbar on top, the remote-screen canvas filling everything else.
-       The canvas element is CSS-sized to the available area; its pixel buffer is sized by the
-       incoming frames. Input coordinates are converted from CSS space to frame space on send. */
+    /* Full-window layout: a slim toolbar on top, the remote-screen video filling everything else.
+       The video element is CSS-sized to the available area; the actual stream resolution is
+       whatever the server rendered. Input coordinates are converted from CSS space to stream
+       space on send. */
     html, body { margin: 0; height: 100%; overflow: hidden; }
     #toolbar { display: flex; gap: 8px; padding: 8px; box-sizing: border-box; height: 48px; background: #f4f4f4; }
     #url { flex: 1; }
-    #screen { display: block; width: 100vw; height: calc(100vh - 48px); background: #eee; outline: none; }
+    #screen { display: block; width: 100vw; height: calc(100vh - 48px); background: #222; outline: none; object-fit: contain; }
   </style>
 </head>
 <body>
@@ -18,11 +19,12 @@
     <input id="url" type="text" placeholder="https://example.com" value="https://example.com" />
     <button id="fetchBtn">Fetch</button>
   </div>
-  <canvas id="screen" tabindex="0"></canvas>
+  <!-- The rendered page arrives as a VP8 video track; the browser plays it like any video call.
+       tabindex makes the element focusable so keyboard events can be captured and forwarded. -->
+  <video id="screen" autoplay muted playsinline tabindex="0"></video>
 
   <script>
-    const canvas = document.getElementById('screen');
-    const ctx = canvas.getContext('2d');
+    const video = document.getElementById('screen');
 
     // Session diagnostics go to the browser devtools console, not the page UI.
     function log(msg) {
@@ -44,67 +46,30 @@
       });
     }
 
-    // Reassembles frames from the frame channel's raw byte stream: each frame on the wire is
-    // [4-byte big-endian length][JPEG bytes]. Chunking on the server side means one frame can
-    // arrive as several onmessage events, or several frames can be sitting in the buffer at once,
-    // so frames are extracted from a running byte buffer rather than assumed 1:1 with messages.
-    function createFrameReassembler(onFrame) {
-      let buffer = new Uint8Array(0);
-
-      function append(chunk) {
-        const combined = new Uint8Array(buffer.length + chunk.length);
-        combined.set(buffer, 0);
-        combined.set(chunk, buffer.length);
-        buffer = combined;
-        extractFrames();
-      }
-
-      function extractFrames() {
-        for (;;) {
-          if (buffer.length < 4) return;
-          const view = new DataView(buffer.buffer, buffer.byteOffset, 4);
-          const frameLength = view.getUint32(0, false);
-          if (buffer.length < 4 + frameLength) return;
-          const frameBytes = buffer.slice(4, 4 + frameLength);
-          buffer = buffer.slice(4 + frameLength);
-          onFrame(frameBytes);
-        }
-      }
-
-      return { append };
-    }
-
-    // Timestamp of the most recent input send, used to log click/scroll-to-visible-frame latency
-    // (time between the user's action and the next frame that reflects it) for perf diagnosis.
+    // Timestamp of the most recent input send, used to log input-to-visible-frame latency for
+    // perf diagnosis (via requestVideoFrameCallback on the next composited video frame).
     let lastInputSentAt = 0;
     let lastInputType = null;
 
-    async function renderFrame(jpegBytes) {
-      const blob = new Blob([jpegBytes], { type: 'image/jpeg' });
-      const bitmap = await createImageBitmap(blob);
-      if (canvas.width !== bitmap.width || canvas.height !== bitmap.height) {
-        canvas.width = bitmap.width;
-        canvas.height = bitmap.height;
-      }
-      ctx.drawImage(bitmap, 0, 0);
-      bitmap.close();
-      if (lastInputSentAt) {
-        console.log(`[timing] frame after '${lastInputType}': ${(performance.now() - lastInputSentAt).toFixed(1)}ms`);
-        lastInputSentAt = 0;
-      }
+    // Converts mouse coordinates from CSS pixels (the video element's on-screen box) to stream
+    // pixels (server page coordinates). object-fit: contain letterboxes the video inside the
+    // element when aspect ratios differ, so the visible video's offset and scale inside the
+    // element must be accounted for — a plain width ratio would misplace clicks in the bars.
+    function toStreamCoords(e) {
+      const elemW = video.clientWidth, elemH = video.clientHeight;
+      const streamW = video.videoWidth, streamH = video.videoHeight;
+      if (!streamW || !streamH) return null;
+      const scale = Math.min(elemW / streamW, elemH / streamH);
+      const shownW = streamW * scale, shownH = streamH * scale;
+      const offX = (elemW - shownW) / 2, offY = (elemH - shownH) / 2;
+      const x = (e.offsetX - offX) / scale;
+      const y = (e.offsetY - offY) / scale;
+      if (x < 0 || y < 0 || x > streamW || y > streamH) return null; // click in the letterbox bars
+      return { x, y };
     }
 
-    // Converts mouse coordinates from CSS pixels (the canvas element's on-screen size) to frame
-    // pixels (the canvas bitmap / server page coordinates). The two differ whenever the window was
-    // resized after the session started, or the requested size was clamped by the server.
-    function toFrameCoords(e) {
-      const scaleX = canvas.width / canvas.clientWidth;
-      const scaleY = canvas.height / canvas.clientHeight;
-      return { x: e.offsetX * scaleX, y: e.offsetY * scaleY };
-    }
-
-    // Captures mouse/keyboard/scroll on the canvas and forwards each as a small JSON InputEvent
-    // over the input channel, to be replayed on the server-side rendered page.
+    // Captures mouse/keyboard/scroll on the video element and forwards each as a small JSON
+    // InputEvent over the input channel, to be replayed on the server-side rendered page.
     function wireInputCapture(inputChannel) {
       function send(event) {
         if (inputChannel.readyState === 'open') {
@@ -116,13 +81,10 @@
 
       // Native mousemove/wheel events fire far faster than the server can round-trip each one
       // through Playwright/CDP; coalescing to at most one message per animation frame keeps
-      // input responsive instead of queuing a backlog of stale events (this is what made
-      // scrolling feel slow before). Discrete events (down/up/key) stay uncoalesced since
-      // they're low-frequency and order/timing-sensitive.
-      // No separate 'click' event is sent: the browser fires mousedown+mouseup+click for one
-      // physical click, and forwarding all three made the server replay TWO clicks (down/up pair
-      // plus Playwright ClickAsync's own synthesized down/up) — double navigation, broken feel.
-      // The down/up pair alone IS the click; the server replays it at the event's coordinates.
+      // input responsive instead of queuing a backlog of stale events. Discrete events
+      // (down/up/key) stay uncoalesced since they're low-frequency and order/timing-sensitive.
+      // No separate 'click' event is sent: the down/up pair IS the click (forwarding the
+      // browser's synthesized click event too made the server replay two clicks).
       let pendingMove = null;
       let pendingWheel = null;
       let flushScheduled = false;
@@ -137,15 +99,28 @@
         });
       }
 
-      canvas.addEventListener('mousemove', (e) => {
-        pendingMove = { type: 'mousemove', ...toFrameCoords(e) };
+      video.addEventListener('mousemove', (e) => {
+        const pos = toStreamCoords(e);
+        if (!pos) return;
+        pendingMove = { type: 'mousemove', ...pos };
         scheduleFlush();
       });
       // Drop any coalesced move still pending: down/up carry their own coordinates, and a stale
       // move flushing between down and up would turn a plain click into an accidental drag.
-      canvas.addEventListener('mousedown', (e) => { canvas.focus(); pendingMove = null; send({ type: 'mousedown', ...toFrameCoords(e) }); });
-      canvas.addEventListener('mouseup', (e) => { pendingMove = null; send({ type: 'mouseup', ...toFrameCoords(e) }); });
-      canvas.addEventListener('wheel', (e) => {
+      video.addEventListener('mousedown', (e) => {
+        video.focus();
+        const pos = toStreamCoords(e);
+        if (!pos) return;
+        pendingMove = null;
+        send({ type: 'mousedown', ...pos });
+      });
+      video.addEventListener('mouseup', (e) => {
+        const pos = toStreamCoords(e);
+        if (!pos) return;
+        pendingMove = null;
+        send({ type: 'mouseup', ...pos });
+      });
+      video.addEventListener('wheel', (e) => {
         e.preventDefault();
         if (pendingWheel) {
           pendingWheel.deltaX += e.deltaX;
@@ -155,8 +130,8 @@
         }
         scheduleFlush();
       }, { passive: false });
-      canvas.addEventListener('keydown', (e) => { e.preventDefault(); send({ type: 'keydown', key: e.key }); });
-      canvas.addEventListener('keyup', (e) => { e.preventDefault(); send({ type: 'keyup', key: e.key }); });
+      video.addEventListener('keydown', (e) => { e.preventDefault(); send({ type: 'keydown', key: e.key }); });
+      video.addEventListener('keyup', (e) => { e.preventDefault(); send({ type: 'keyup', key: e.key }); });
     }
 
     // The active session's peer connection; closed before starting a new one so re-fetching
@@ -172,32 +147,44 @@
         activePc = null;
       }
 
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
       log('Starting session for ' + url);
 
       const pc = new RTCPeerConnection();
       activePc = pc;
 
-      // negotiated + fixed ids: must match the ids the server uses (see WebRtcSessionManager.cs) —
-      // id 0 streams rendered frames server -> client, id 1 carries input events client -> server.
-      const frameChannel = pc.createDataChannel('frame-stream', { negotiated: true, id: 0 });
-      frameChannel.binaryType = 'arraybuffer';
-      const inputChannel = pc.createDataChannel('input-events', { negotiated: true, id: 1 });
+      // Receive-only video: the server answers with a send-only VP8 track carrying the rendered
+      // page. Must be in the offer, since the answering side can't add new media sections.
+      pc.addTransceiver('video', { direction: 'recvonly' });
 
-      const reassembler = createFrameReassembler(renderFrame);
-      let frameCount = 0;
-
-      frameChannel.onopen = () => log('Frame channel open');
-      frameChannel.onerror = (e) => log('Frame channel error: ' + e.error);
-      frameChannel.onclose = () => log('Frame channel closed after ' + frameCount + ' frames');
-      frameChannel.onmessage = (event) => {
-        frameCount++;
-        // Exposed for external diagnosis (e.g. automated tests polling receive progress).
-        window.__rbiStats = { messages: frameCount, lastBytes: event.data.byteLength };
-        reassembler.append(new Uint8Array(event.data));
+      pc.ontrack = (event) => {
+        log('Video track received');
+        // Interactive stream, not a movie: ask the receiver to play frames out as soon as they
+        // arrive instead of holding them in the jitter buffer for smoothness. Cuts 100ms+ of
+        // input-to-glass latency; occasional micro-stutter on frame-rate dips is an acceptable
+        // trade for a remote-control UI. (Both properties are hints; browsers clamp them.)
+        if (event.receiver) {
+          try { event.receiver.jitterBufferTarget = 0; } catch {}
+          try { event.receiver.playoutDelayHint = 0; } catch {}
+        }
+        video.srcObject = event.streams[0] && event.streams[0].active !== undefined
+          ? event.streams[0]
+          : new MediaStream([event.track]);
+        if ('requestVideoFrameCallback' in video) {
+          const onFrame = () => {
+            if (lastInputSentAt) {
+              console.log(`[timing] frame after '${lastInputType}': ${(performance.now() - lastInputSentAt).toFixed(1)}ms`);
+              lastInputSentAt = 0;
+            }
+            video.requestVideoFrameCallback(onFrame);
+          };
+          video.requestVideoFrameCallback(onFrame);
+        }
       };
 
-      inputChannel.onopen = () => wireInputCapture(inputChannel);
+      // negotiated + fixed id: must match the id the server uses (see WebRtcSessionManager.cs) —
+      // carries input events client -> server as JSON.
+      const inputChannel = pc.createDataChannel('input-events', { negotiated: true, id: 1 });
+      inputChannel.onopen = () => { log('Input channel open'); wireInputCapture(inputChannel); };
       inputChannel.onerror = (e) => log('Input channel error: ' + e.error);
 
       try {
@@ -205,12 +192,11 @@
         await pc.setLocalDescription(offer);
         await waitForIceGatheringComplete(pc);
 
-        // Request a render size matching the canvas's on-screen area, scaled down (preserving
-        // aspect ratio) to fit the server's 1280x720 cap — per-axis clamping server-side would
-        // distort the aspect and stretch the picture. Bigger frames also cost latency (~75KB/s
-        // send ceiling), so the cap is as much about responsiveness as about safety.
-        const availW = canvas.clientWidth;
-        const availH = canvas.clientHeight;
+        // Request a render size matching the video element's on-screen area, scaled down
+        // (preserving aspect ratio) to fit the server's 1280x720 cap. object-fit: contain
+        // letterboxes any residual mismatch instead of stretching.
+        const availW = video.clientWidth;
+        const availH = video.clientHeight;
         const fit = Math.min(1280 / availW, 720 / availH, 1);
         const reqW = Math.round(availW * fit);
         const reqH = Math.round(availH * fit);
@@ -231,7 +217,7 @@
 
         const { sdp: answerSdp } = await resp.json();
         await pc.setRemoteDescription({ type: 'answer', sdp: answerSdp });
-        log('Remote description set, waiting for frames...');
+        log('Remote description set, waiting for video...');
       } catch (e) {
         log('Error: ' + e.message);
         pc.close();

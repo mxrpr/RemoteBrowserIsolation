@@ -13,11 +13,31 @@ builder.Services.AddHttpClient<IPageDownloader, PageDownloader>(client =>
     client.Timeout = TimeSpan.FromSeconds(30);
 });
 builder.Services.AddSingleton<IHeadlessBrowserSessionManager, HeadlessBrowserSessionManager>();
-builder.Services.AddSingleton<IFrameStreamer, FrameStreamer>();
+builder.Services.AddSingleton<IVideoTrackStreamer, VideoTrackStreamer>();
 builder.Services.AddSingleton<IInputEventForwarder, InputEventForwarder>();
 builder.Services.AddSingleton<IWebRtcSessionManager, WebRtcSessionManager>();
 
 var app = builder.Build();
+
+// Bind the FFmpeg native libraries (VP8 encoder for the video track) before any session starts.
+// The lib directory is machine-specific config ("FFmpeg:LibPath"); fail fast with an actionable
+// message rather than letting the first session die with an obscure DllNotFoundException.
+var ffmpegLibPath = app.Configuration["FFmpeg:LibPath"]
+    ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "apps", "ffmpeg-8.1", "lib");
+try
+{
+    // AV_LOG_ERROR: FFmpeg's native warnings are noise here — notably a benign per-session
+    // "deprecated pixel format" line from swscale (CDP's JPEGs decode to the legacy full-range
+    // YUVJ420P format; the conversion handles it correctly, it just complains).
+    SIPSorceryMedia.FFmpeg.FFmpegInit.Initialise(SIPSorceryMedia.FFmpeg.FfmpegLogLevelEnum.AV_LOG_ERROR, ffmpegLibPath, app.Logger);
+    app.Logger.LogInformation("FFmpeg initialised from {LibPath}", ffmpegLibPath);
+}
+catch (Exception ex)
+{
+    throw new InvalidOperationException(
+        $"Failed to initialise FFmpeg from '{ffmpegLibPath}'. Install an FFmpeg 8.x shared build there " +
+        "or point config key 'FFmpeg:LibPath' at its lib directory.", ex);
+}
 
 app.Use(async (context, next) =>
 {
@@ -79,6 +99,12 @@ app.Lifetime.ApplicationStarted.Register(() =>
     {
         logger.LogInformation("Accepting browser connections on {Address}", address);
     }
+});
+
+app.Lifetime.ApplicationStopping.Register(() =>
+{
+    var logger = app.Services.GetRequiredService<ILogger<Program>>();
+    logger.LogInformation("Server is shutting down...");
 });
 
 app.Lifetime.ApplicationStarted.Register(() =>
