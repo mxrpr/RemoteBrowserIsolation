@@ -1,23 +1,54 @@
+using System.Collections.Concurrent;
 using SIPSorcery.Net;
 
 namespace RemoteBrowserIsolation.Server.Services;
 
 public interface IWebRtcSessionManager
 {
-    Task<string> CreateSessionAsync(string offerSdp, Uri targetUrl, CancellationToken cancellationToken = default);
+    Task<string> CreateSessionAsync(string offerSdp, Uri targetUrl, int? viewportWidth = null, int? viewportHeight = null, CancellationToken cancellationToken = default);
 }
 
-public sealed class WebRtcSessionManager(IPageDownloader downloader, ILogger<WebRtcSessionManager> logger) : IWebRtcSessionManager
+// Orchestrates one WebRTC session end to end: negotiates the peer connection and its two
+// pre-negotiated data channels (frame output, input input), and — once the frame channel opens —
+// starts a server-side rendering session and wires frame streaming and input forwarding to it.
+// Tears the rendering session down once the peer connection disconnects, so headless-browser
+// resources don't leak across sessions.
+public sealed class WebRtcSessionManager(
+    IHeadlessBrowserSessionManager browserSessionManager,
+    IFrameStreamer frameStreamer,
+    IInputEventForwarder inputEventForwarder,
+    ILogger<WebRtcSessionManager> logger) : IWebRtcSessionManager
 {
-    public async Task<string> CreateSessionAsync(string offerSdp, Uri targetUrl, CancellationToken cancellationToken = default)
+    // Bounds for the client-requested viewport. The lower bound guards against degenerate/abusive
+    // values; the upper bound caps frame payload size — the data channel drains at roughly 75KB/s
+    // (see FrameStreamer), so rendering at, say, full 4K would push per-frame latency back into
+    // whole seconds no matter what the client asked for.
+    private const int MinViewportWidth = 320;
+    private const int MinViewportHeight = 180;
+    private const int MaxViewportWidth = 1280;
+    private const int MaxViewportHeight = 720;
+    private const int DefaultViewportWidth = 640;
+    private const int DefaultViewportHeight = 360;
+
+    // Peer connections don't carry session state themselves, so track each one's rendering session
+    // here to look it up again on teardown.
+    private readonly ConcurrentDictionary<RTCPeerConnection, HeadlessSession> activeSessions = new();
+
+    public async Task<string> CreateSessionAsync(string offerSdp, Uri targetUrl, int? viewportWidth = null, int? viewportHeight = null, CancellationToken cancellationToken = default)
     {
+        var width = Math.Clamp(viewportWidth ?? DefaultViewportWidth, MinViewportWidth, MaxViewportWidth);
+        var height = Math.Clamp(viewportHeight ?? DefaultViewportHeight, MinViewportHeight, MaxViewportHeight);
+
         var pc = new RTCPeerConnection();
 
-        // negotiated + fixed id: the client must create its channel with the same id (0) out-of-band,
-        // since the server is the answerer and can't add a new data-channel section via SDP alone.
-        var dataChannel = await pc.createDataChannel("page-content", new RTCDataChannelInit { negotiated = true, id = 0 });
-        dataChannel.onopen += () => _ = SendPageAsync(pc, dataChannel, targetUrl);
-        dataChannel.onerror += error => logger.LogWarning("Data channel error for {Url}: {Error}", targetUrl, error);
+        // negotiated + fixed ids: the client must create both channels with the same ids out-of-band,
+        // since the server is the answerer and can't add new data-channel sections via SDP alone.
+        var frameChannel = await pc.createDataChannel("frame-stream", new RTCDataChannelInit { negotiated = true, id = 0 });
+        var inputChannel = await pc.createDataChannel("input-events", new RTCDataChannelInit { negotiated = true, id = 1 });
+
+        frameChannel.onopen += () => _ = StartRenderingSessionAsync(pc, frameChannel, inputChannel, targetUrl, width, height);
+        frameChannel.onerror += error => logger.LogWarning("Frame channel error for {Url}: {Error}", targetUrl, error);
+        pc.onconnectionstatechange += state => OnConnectionStateChanged(pc, state, targetUrl);
 
         var setRemoteResult = pc.setRemoteDescription(new RTCSessionDescriptionInit { type = RTCSdpType.offer, sdp = offerSdp });
         if (setRemoteResult != SetDescriptionResultEnum.OK)
@@ -32,60 +63,55 @@ public sealed class WebRtcSessionManager(IPageDownloader downloader, ILogger<Web
         return pc.localDescription.sdp.ToString();
     }
 
-    private async Task SendPageAsync(RTCPeerConnection pc, RTCDataChannel dataChannel, Uri targetUrl)
+    // Fired once the frame data channel is actually open: launches the headless-browser session,
+    // wires input replay to it, and starts the frame stream. Runs fire-and-forget from the onopen
+    // callback, after the HTTP request that created the session has already completed.
+    private async Task StartRenderingSessionAsync(RTCPeerConnection pc, RTCDataChannel frameChannel, RTCDataChannel inputChannel, Uri targetUrl, int viewportWidth, int viewportHeight)
     {
         try
         {
-            var result = await downloader.DownloadAsync(targetUrl);
-            if (result.Success)
-            {
-                SendChunked(pc, dataChannel, result.Content!);
-                await WaitForSendBufferDrainAsync(dataChannel);
-                logger.LogInformation("Sent {ByteLength} bytes for {Url} over data channel", result.Content!.Length, targetUrl);
-            }
-            else
-            {
-                logger.LogWarning("Fetch failed for {Url}: {Error}", targetUrl, result.ErrorMessage);
-            }
+            var session = await browserSessionManager.CreateSessionAsync(targetUrl, viewportWidth, viewportHeight);
+            activeSessions[pc] = session;
+
+            inputEventForwarder.Wire(inputChannel, session.Page, targetUrl);
+            await frameStreamer.StartAsync(pc, frameChannel, session, targetUrl, viewportWidth, viewportHeight);
+
+            logger.LogInformation("Started rendering session for {Url} at {Width}x{Height}", targetUrl, viewportWidth, viewportHeight);
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "Failed to send page content for {Url}", targetUrl);
-        }
-        finally
-        {
-            dataChannel.close();
+            logger.LogError(ex, "Failed to start rendering session for {Url}", targetUrl);
             pc.close();
         }
     }
 
-    // RTCDataChannel.send() does not chunk internally — a single call exceeding the negotiated
-    // SCTP maxMessageSize throws, so pages larger than that limit must be split into multiple sends.
-    private static void SendChunked(RTCPeerConnection pc, RTCDataChannel dataChannel, byte[] content)
+    // Closes the headless-browser session once the peer connection is no longer usable (closed,
+    // failed, or disconnected), so BrowserContext/Page resources don't leak past client disconnect.
+    private void OnConnectionStateChanged(RTCPeerConnection pc, RTCPeerConnectionState state, Uri targetUrl)
     {
-        var maxMessageSize = (int)Math.Min(pc.sctp.maxMessageSize, int.MaxValue);
-        if (maxMessageSize <= 0)
+        if (state is not (RTCPeerConnectionState.closed or RTCPeerConnectionState.failed or RTCPeerConnectionState.disconnected))
         {
-            maxMessageSize = content.Length;
+            return;
         }
 
-        for (var offset = 0; offset < content.Length; offset += maxMessageSize)
+        if (activeSessions.TryRemove(pc, out var session))
         {
-            var count = Math.Min(maxMessageSize, content.Length - offset);
-            dataChannel.send(content, offset, count);
+            _ = TeardownAsync(session, targetUrl);
         }
     }
 
-    // send() only queues data on the SCTP association; closing the channel right after send()
-    // returns can tear it down before a multi-chunk payload has actually gone out over the wire.
-    // Poll bufferedAmount down to zero (with a safety timeout) before closing.
-    private static async Task WaitForSendBufferDrainAsync(RTCDataChannel dataChannel, int timeoutMs = 10_000, int pollIntervalMs = 20)
+    // Disposes one session's headless-browser resources; swallows/logs failures since teardown
+    // happens after the client is already gone and there's no one left to report an error to.
+    private async Task TeardownAsync(HeadlessSession session, Uri targetUrl)
     {
-        var elapsed = 0;
-        while (dataChannel.bufferedAmount > 0 && elapsed < timeoutMs)
+        try
         {
-            await Task.Delay(pollIntervalMs);
-            elapsed += pollIntervalMs;
+            await browserSessionManager.CloseSessionAsync(session);
+            logger.LogInformation("Closed rendering session for {Url}", targetUrl);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Error while closing rendering session for {Url}", targetUrl);
         }
     }
 }

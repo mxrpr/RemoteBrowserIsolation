@@ -3,22 +3,30 @@
 <head>
   <meta charset="utf-8" />
   <title>RBI Test Client</title>
+  <style>
+    /* Full-window layout: a slim toolbar on top, the remote-screen canvas filling everything else.
+       The canvas element is CSS-sized to the available area; its pixel buffer is sized by the
+       incoming frames. Input coordinates are converted from CSS space to frame space on send. */
+    html, body { margin: 0; height: 100%; overflow: hidden; }
+    #toolbar { display: flex; gap: 8px; padding: 8px; box-sizing: border-box; height: 48px; background: #f4f4f4; }
+    #url { flex: 1; }
+    #screen { display: block; width: 100vw; height: calc(100vh - 48px); background: #eee; outline: none; }
+  </style>
 </head>
 <body>
-  <h1>Remote Browser Isolation - Test Client</h1>
-  <input id="url" type="text" placeholder="https://example.com" size="50" value="https://example.com" />
-  <button id="fetchBtn">Fetch</button>
-  <pre id="log" style="background:#111;color:#0f0;padding:1em;height:200px;overflow:auto"></pre>
-  <h2>Received content</h2>
-  <pre id="content" style="background:#f5f5f5;padding:1em;white-space:pre-wrap;word-break:break-all"></pre>
+  <div id="toolbar">
+    <input id="url" type="text" placeholder="https://example.com" value="https://example.com" />
+    <button id="fetchBtn">Fetch</button>
+  </div>
+  <canvas id="screen" tabindex="0"></canvas>
 
   <script>
-    const logEl = document.getElementById('log');
-    const contentEl = document.getElementById('content');
+    const canvas = document.getElementById('screen');
+    const ctx = canvas.getContext('2d');
 
+    // Session diagnostics go to the browser devtools console, not the page UI.
     function log(msg) {
-      logEl.textContent += msg + '\n';
-      logEl.scrollTop = logEl.scrollHeight;
+      console.log('[rbi] ' + msg);
     }
 
     function waitForIceGatheringComplete(pc) {
@@ -36,48 +44,182 @@
       });
     }
 
+    // Reassembles frames from the frame channel's raw byte stream: each frame on the wire is
+    // [4-byte big-endian length][JPEG bytes]. Chunking on the server side means one frame can
+    // arrive as several onmessage events, or several frames can be sitting in the buffer at once,
+    // so frames are extracted from a running byte buffer rather than assumed 1:1 with messages.
+    function createFrameReassembler(onFrame) {
+      let buffer = new Uint8Array(0);
+
+      function append(chunk) {
+        const combined = new Uint8Array(buffer.length + chunk.length);
+        combined.set(buffer, 0);
+        combined.set(chunk, buffer.length);
+        buffer = combined;
+        extractFrames();
+      }
+
+      function extractFrames() {
+        for (;;) {
+          if (buffer.length < 4) return;
+          const view = new DataView(buffer.buffer, buffer.byteOffset, 4);
+          const frameLength = view.getUint32(0, false);
+          if (buffer.length < 4 + frameLength) return;
+          const frameBytes = buffer.slice(4, 4 + frameLength);
+          buffer = buffer.slice(4 + frameLength);
+          onFrame(frameBytes);
+        }
+      }
+
+      return { append };
+    }
+
+    // Timestamp of the most recent input send, used to log click/scroll-to-visible-frame latency
+    // (time between the user's action and the next frame that reflects it) for perf diagnosis.
+    let lastInputSentAt = 0;
+    let lastInputType = null;
+
+    async function renderFrame(jpegBytes) {
+      const blob = new Blob([jpegBytes], { type: 'image/jpeg' });
+      const bitmap = await createImageBitmap(blob);
+      if (canvas.width !== bitmap.width || canvas.height !== bitmap.height) {
+        canvas.width = bitmap.width;
+        canvas.height = bitmap.height;
+      }
+      ctx.drawImage(bitmap, 0, 0);
+      bitmap.close();
+      if (lastInputSentAt) {
+        console.log(`[timing] frame after '${lastInputType}': ${(performance.now() - lastInputSentAt).toFixed(1)}ms`);
+        lastInputSentAt = 0;
+      }
+    }
+
+    // Converts mouse coordinates from CSS pixels (the canvas element's on-screen size) to frame
+    // pixels (the canvas bitmap / server page coordinates). The two differ whenever the window was
+    // resized after the session started, or the requested size was clamped by the server.
+    function toFrameCoords(e) {
+      const scaleX = canvas.width / canvas.clientWidth;
+      const scaleY = canvas.height / canvas.clientHeight;
+      return { x: e.offsetX * scaleX, y: e.offsetY * scaleY };
+    }
+
+    // Captures mouse/keyboard/scroll on the canvas and forwards each as a small JSON InputEvent
+    // over the input channel, to be replayed on the server-side rendered page.
+    function wireInputCapture(inputChannel) {
+      function send(event) {
+        if (inputChannel.readyState === 'open') {
+          lastInputSentAt = performance.now();
+          lastInputType = event.type;
+          inputChannel.send(JSON.stringify(event));
+        }
+      }
+
+      // Native mousemove/wheel events fire far faster than the server can round-trip each one
+      // through Playwright/CDP; coalescing to at most one message per animation frame keeps
+      // input responsive instead of queuing a backlog of stale events (this is what made
+      // scrolling feel slow before). Discrete events (down/up/key) stay uncoalesced since
+      // they're low-frequency and order/timing-sensitive.
+      // No separate 'click' event is sent: the browser fires mousedown+mouseup+click for one
+      // physical click, and forwarding all three made the server replay TWO clicks (down/up pair
+      // plus Playwright ClickAsync's own synthesized down/up) — double navigation, broken feel.
+      // The down/up pair alone IS the click; the server replays it at the event's coordinates.
+      let pendingMove = null;
+      let pendingWheel = null;
+      let flushScheduled = false;
+
+      function scheduleFlush() {
+        if (flushScheduled) return;
+        flushScheduled = true;
+        requestAnimationFrame(() => {
+          flushScheduled = false;
+          if (pendingMove) { send(pendingMove); pendingMove = null; }
+          if (pendingWheel) { send(pendingWheel); pendingWheel = null; }
+        });
+      }
+
+      canvas.addEventListener('mousemove', (e) => {
+        pendingMove = { type: 'mousemove', ...toFrameCoords(e) };
+        scheduleFlush();
+      });
+      // Drop any coalesced move still pending: down/up carry their own coordinates, and a stale
+      // move flushing between down and up would turn a plain click into an accidental drag.
+      canvas.addEventListener('mousedown', (e) => { canvas.focus(); pendingMove = null; send({ type: 'mousedown', ...toFrameCoords(e) }); });
+      canvas.addEventListener('mouseup', (e) => { pendingMove = null; send({ type: 'mouseup', ...toFrameCoords(e) }); });
+      canvas.addEventListener('wheel', (e) => {
+        e.preventDefault();
+        if (pendingWheel) {
+          pendingWheel.deltaX += e.deltaX;
+          pendingWheel.deltaY += e.deltaY;
+        } else {
+          pendingWheel = { type: 'wheel', deltaX: e.deltaX, deltaY: e.deltaY };
+        }
+        scheduleFlush();
+      }, { passive: false });
+      canvas.addEventListener('keydown', (e) => { e.preventDefault(); send({ type: 'keydown', key: e.key }); });
+      canvas.addEventListener('keyup', (e) => { e.preventDefault(); send({ type: 'keyup', key: e.key }); });
+    }
+
+    // The active session's peer connection; closed before starting a new one so re-fetching
+    // doesn't leave the previous session streaming (and burning server resources) in the background.
+    let activePc = null;
+
     document.getElementById('fetchBtn').onclick = async () => {
       const url = document.getElementById('url').value.trim();
       if (!url) return;
 
-      logEl.textContent = '';
-      contentEl.textContent = '';
+      if (activePc) {
+        activePc.close();
+        activePc = null;
+      }
+
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
       log('Starting session for ' + url);
 
       const pc = new RTCPeerConnection();
+      activePc = pc;
 
-      // negotiated + fixed id: must match the id the server uses (see WebRtcSessionManager.cs)
-      const channel = pc.createDataChannel('page-content', { negotiated: true, id: 0 });
-      channel.binaryType = 'arraybuffer';
+      // negotiated + fixed ids: must match the ids the server uses (see WebRtcSessionManager.cs) —
+      // id 0 streams rendered frames server -> client, id 1 carries input events client -> server.
+      const frameChannel = pc.createDataChannel('frame-stream', { negotiated: true, id: 0 });
+      frameChannel.binaryType = 'arraybuffer';
+      const inputChannel = pc.createDataChannel('input-events', { negotiated: true, id: 1 });
 
-      const chunks = [];
-      let receivedBytes = 0;
+      const reassembler = createFrameReassembler(renderFrame);
+      let frameCount = 0;
 
-      channel.onopen = () => log('Data channel open');
-      channel.onerror = (e) => log('Data channel error: ' + e.error);
-      channel.onclose = () => {
-        log('Data channel closed. Total bytes received: ' + receivedBytes);
-        const blob = new Blob(chunks);
-        blob.text().then((text) => {
-          contentEl.textContent = text;
-        });
+      frameChannel.onopen = () => log('Frame channel open');
+      frameChannel.onerror = (e) => log('Frame channel error: ' + e.error);
+      frameChannel.onclose = () => log('Frame channel closed after ' + frameCount + ' frames');
+      frameChannel.onmessage = (event) => {
+        frameCount++;
+        // Exposed for external diagnosis (e.g. automated tests polling receive progress).
+        window.__rbiStats = { messages: frameCount, lastBytes: event.data.byteLength };
+        reassembler.append(new Uint8Array(event.data));
       };
-      channel.onmessage = (event) => {
-        chunks.push(event.data);
-        receivedBytes += event.data.byteLength;
-        log('Received chunk: ' + event.data.byteLength + ' bytes (total ' + receivedBytes + ')');
-      };
+
+      inputChannel.onopen = () => wireInputCapture(inputChannel);
+      inputChannel.onerror = (e) => log('Input channel error: ' + e.error);
 
       try {
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
         await waitForIceGatheringComplete(pc);
 
+        // Request a render size matching the canvas's on-screen area, scaled down (preserving
+        // aspect ratio) to fit the server's 1280x720 cap — per-axis clamping server-side would
+        // distort the aspect and stretch the picture. Bigger frames also cost latency (~75KB/s
+        // send ceiling), so the cap is as much about responsiveness as about safety.
+        const availW = canvas.clientWidth;
+        const availH = canvas.clientHeight;
+        const fit = Math.min(1280 / availW, 720 / availH, 1);
+        const reqW = Math.round(availW * fit);
+        const reqH = Math.round(availH * fit);
+
         log('Sending offer to server...');
         const resp = await fetch('/api/session/offer', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ url, sdp: pc.localDescription.sdp })
+          body: JSON.stringify({ url, sdp: pc.localDescription.sdp, width: reqW, height: reqH })
         });
 
         if (!resp.ok) {
@@ -89,7 +231,7 @@
 
         const { sdp: answerSdp } = await resp.json();
         await pc.setRemoteDescription({ type: 'answer', sdp: answerSdp });
-        log('Remote description set, waiting for data...');
+        log('Remote description set, waiting for frames...');
       } catch (e) {
         log('Error: ' + e.message);
         pc.close();
