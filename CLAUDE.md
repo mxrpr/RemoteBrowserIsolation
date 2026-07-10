@@ -56,3 +56,6 @@ grep -n "M:SIPSorcery.Net.RTCPeerConnection\." ~/.nuget/packages/sipsorcery/<ver
 # full reflection dump (covers everything, including undocumented properties/events) —
 # build a throwaway console project referencing SIPSorcery and reflect over the type.
 ```
+
+## MANDATORY Comments in code
+Whenever a new class or function/method is created add comment about the function of the class/method/function.
