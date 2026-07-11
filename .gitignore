@@ -19,3 +19,6 @@ publish/
 
 # Locally-generated root CA (private key material — never check in)
 certs/
+
+# Downloaded by scripts/install_dependencies.sh (FFmpeg shared libs)
+deps/

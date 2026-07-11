@@ -91,32 +91,37 @@ Steps to get a working dev environment from a clean machine.
    This pulls all NuGet packages (SIPSorcery, SIPSorceryMedia.FFmpeg, Microsoft.Playwright,
    EF Core/Sqlite, AngleSharp, etc.) automatically.
 
-4. **Install Playwright's headless Chromium**
-   The `Microsoft.Playwright` package is restored by `dotnet build`, but the actual browser binary
-   is a separate download:
+4. **Install Playwright's headless Chromium and FFmpeg 8.x**
+
+   **Linux (x86_64):**
    ```bash
-   pwsh bin/Debug/net9.0/playwright.ps1 install --with-deps chromium
+   cd ../..   # back to repo root
+   ./scripts/install_dependencies.sh
    ```
-   No PowerShell installed? Get it from
-   https://learn.microsoft.com/powershell/scripting/install/installing-powershell — it's the only
-   supported way to run Playwright's .NET installer script.
 
-5. **Install FFmpeg 8.x (shared libs)**
-   `SIPSorceryMedia.FFmpeg` needs FFmpeg 8.x shared libraries (`libavcodec.so.62` etc. on Linux) at
-   a known path — Ubuntu's package manager ships an older 6.x build, which won't work. Download a
-   matching build, e.g. the BtbN shared build for your OS:
-   https://github.com/BtbN/FFmpeg-Builds/releases (pick an `n8.x-...-shared` asset for your
-   platform), extract it, and note the `lib/` directory path.
-
-6. **Point the app at your FFmpeg lib directory**
-   Either set `FFmpeg:LibPath` in `src/RemoteBrowserIsolation.Server/appsettings.Development.json`,
-   or export an env var override:
-   ```bash
-   export FFmpeg__LibPath=/path/to/ffmpeg/lib
+   **Windows (x64):** in PowerShell, from the repo root:
+   ```powershell
+   .\scripts\install_dependencies.ps1
    ```
-   (Default fallback if unset: `~/apps/ffmpeg-8.1/lib`.)
 
-7. **Run the dev server**
+   Either automates what used to be three manual steps: installs `pwsh` if missing (Linux only —
+   PowerShell is assumed already present on Windows), downloads Playwright's headless Chromium
+   (`Microsoft.Playwright`'s NuGet package only restores bindings, not the browser binary itself),
+   downloads a matching FFmpeg 8.x shared build (`SIPSorceryMedia.FFmpeg` needs `libavcodec.so.62`
+   / `avcodec-62.dll` — neither Ubuntu's apt package nor any Windows package manager ships FFmpeg
+   8.x) into `./deps/ffmpeg-8.1/`, and points `FFmpeg:LibPath` at it (the `lib/` directory on
+   Linux; the `bin/` directory on Windows, since that's where the loadable DLLs actually live) via
+   `src/RemoteBrowserIsolation.Server/appsettings.Development.json`.
+
+   On other platforms, or if you'd rather do it by hand: run
+   `pwsh bin/Debug/net9.0/playwright.ps1 install --with-deps chromium` from
+   `src/RemoteBrowserIsolation.Server` (get `pwsh` from
+   https://learn.microsoft.com/powershell/scripting/install/installing-powershell if needed), grab
+   an `n8.x-...-shared` build for your OS from
+   https://github.com/BtbN/FFmpeg-Builds/releases, and either set `FFmpeg:LibPath` in
+   `appsettings.Development.json` or export `FFmpeg__LibPath=/path/to/ffmpeg/lib`.
+
+5. **Run the dev server**
    From the repo root:
    ```bash
    ./startRBI_dev.sh
@@ -124,10 +129,10 @@ Steps to get a working dev environment from a clean machine.
    This sets `ASPNETCORE_ENVIRONMENT=Development` and runs the app. Watch the startup log for the
    bound address (e.g. `http://localhost:5139`).
 
-8. **Verify it's up**
+6. **Verify it's up**
    Browser → `http://localhost:<port>/health` — should show `{"status":"ok"}`.
 
-9. **Generate a root CA** (needed for HTML mode; skip if you only want video mode)
+7. **Generate a root CA** (needed for HTML mode; skip if you only want video mode)
    From the repo root, in another terminal:
    ```bash
    ./scripts/generate_root_ca.sh
@@ -136,24 +141,24 @@ Steps to get a working dev environment from a clean machine.
    (upload into the admin console next), `certs/rootCA.key` (private, keep secret). Prints a PFX
    password at the end — save it.
 
-10. **Bootstrap the admin account, upload the CA, add a site policy**
+8. **Bootstrap the admin account, upload the CA, add a site policy**
     Browser → `http://localhost:<port>/admin/`. No account exists yet — the first email/password
     you submit on the login screen becomes the admin account.
-    - **Root CA** tab → upload `certs/rootCA.pfx` with the password from step 9.
+    - **Root CA** tab → upload `certs/rootCA.pfx` with the password from step 7.
     - **Policies** tab → add a host (e.g. `example.com`) with a mode (`HtmlAllowInput`,
       `HtmlNoInput`, `VideoAllowInput`, `VideoNoInput`). Unlisted hosts are blocked by default.
 
-11. **Point your browser's proxy setting at the server** (required for HTML-mode sites)
-    HTTP and HTTPS proxy → `localhost:<port from step 7's "Proxy" config>` — default `8080`
+9. **Point your browser's proxy setting at the server** (required for HTML-mode sites)
+    HTTP and HTTPS proxy → `localhost:<port from step 5's "Proxy" config>` — default `8080`
     (`Proxy:Port` in `appsettings.json`). This is how the app sees your browsing traffic; without it
     only direct visits to `/admin/` and `/index.html` reach the app.
 
-12. **Try the full flow**
+10. **Try the full flow**
     - HTML-mode host: navigate to it directly in your address bar — the proxy you just configured
       intercepts and relays it.
     - Video-mode host: open `http://localhost:<port>/index.html`, enter the URL, click Fetch.
 
-13. **Run tests** (currently a no-op until a test project exists)
+11. **Run tests** (currently a no-op until a test project exists)
     ```bash
     ./startTests.sh
     ```
