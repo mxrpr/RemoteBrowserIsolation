@@ -85,8 +85,23 @@
     #loginError { color: var(--danger); font-size: 13px; min-height: 18px; margin-top: 8px; }
 
     /* Main view. */
-    #mainBox:not(.hidden) { max-width: 960px; margin: 0 auto; padding: 28px 20px 64px; }
+    #mainBox:not(.hidden) { max-width: 1080px; margin: 0 auto; padding: 28px 20px 64px; }
     .topbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 24px; }
+
+    .layout { display: flex; gap: 24px; align-items: flex-start; }
+    .sidebar { width: 180px; flex-shrink: 0; display: flex; flex-direction: column; gap: 4px; position: sticky; top: 28px; }
+    .nav-item {
+      text-align: left;
+      background: transparent;
+      border: 1px solid transparent;
+      color: var(--text-muted);
+      padding: 10px 14px;
+      font-size: 13px;
+    }
+    .nav-item:hover { background: var(--row-hover); color: var(--text); }
+    .nav-item.active { background: var(--surface); border-color: var(--border); box-shadow: var(--shadow); color: var(--primary); }
+    .content { flex: 1; min-width: 0; }
+
     .card {
       background: var(--surface);
       border: 1px solid var(--border);
@@ -165,35 +180,47 @@
         <button id="logoutBtn">Log out</button>
       </div>
 
-      <section class="card">
-        <h2>Site policies</h2>
-        <div class="table-wrap">
-          <table id="sitesTable">
-            <thead><tr><th>Host pattern</th><th>View mode</th><th>Updated</th><th></th></tr></thead>
-            <tbody id="sitesBody"></tbody>
-          </table>
-        </div>
-        <form id="addSiteForm">
-          <input id="newHost" type="text" placeholder="example.com" required />
-          <select id="newMode">
-            <option>HtmlAllowInput</option>
-            <option>HtmlNoInput</option>
-            <option>VideoAllowInput</option>
-            <option>VideoNoInput</option>
-          </select>
-          <button type="submit" class="primary">Add site</button>
-        </form>
-      </section>
+      <div class="layout">
+        <!-- Both sections stay mounted (and their data loaded) at all times; the nav just toggles
+             which one is visible. Simpler than lazy-loading on nav click, and the data sets are
+             small enough that eager-loading both up front isn't a real cost. -->
+        <nav class="sidebar">
+          <button class="nav-item active" data-section="policiesSection">Policies</button>
+          <button class="nav-item" data-section="logsSection">Logs</button>
+        </nav>
 
-      <section class="card">
-        <h2>Request log</h2>
-        <div class="table-wrap">
-          <table id="logsTable">
-            <thead><tr><th>Time (UTC)</th><th>Url</th><th>Host</th><th>Decision</th><th>Allowed</th><th>Client IP</th></tr></thead>
-            <tbody id="logsBody"></tbody>
-          </table>
+        <div class="content">
+          <section class="card" id="policiesSection">
+            <h2>Site policies</h2>
+            <div class="table-wrap">
+              <table id="sitesTable">
+                <thead><tr><th>Host pattern</th><th>View mode</th><th>Updated</th><th></th></tr></thead>
+                <tbody id="sitesBody"></tbody>
+              </table>
+            </div>
+            <form id="addSiteForm">
+              <input id="newHost" type="text" placeholder="example.com" required />
+              <select id="newMode">
+                <option>HtmlAllowInput</option>
+                <option>HtmlNoInput</option>
+                <option>VideoAllowInput</option>
+                <option>VideoNoInput</option>
+              </select>
+              <button type="submit" class="primary">Add site</button>
+            </form>
+          </section>
+
+          <section class="card hidden" id="logsSection">
+            <h2>Request log</h2>
+            <div class="table-wrap">
+              <table id="logsTable">
+                <thead><tr><th>Time (UTC)</th><th>Url</th><th>Host</th><th>Decision</th><th>Allowed</th><th>Client IP</th></tr></thead>
+                <tbody id="logsBody"></tbody>
+              </table>
+            </div>
+          </section>
         </div>
-      </section>
+      </div>
     </div>
   </div>
 
@@ -298,6 +325,15 @@
       token = null;
       showLogin();
     };
+
+    // Sidebar nav: shows the clicked section, hides the other, marks the clicked button active.
+    // Data for both sections is already loaded eagerly by showMain() — this is pure visibility.
+    document.querySelectorAll('.nav-item').forEach((btn) => {
+      btn.onclick = () => {
+        document.querySelectorAll('.nav-item').forEach((b) => b.classList.toggle('active', b === btn));
+        document.querySelectorAll('.content > section').forEach((s) => s.classList.toggle('hidden', s.id !== btn.dataset.section));
+      };
+    });
 
     // Renders the current SitePolicy list into #sitesBody, with an inline view-mode <select> (PUT on
     // change) and a delete button per row.
