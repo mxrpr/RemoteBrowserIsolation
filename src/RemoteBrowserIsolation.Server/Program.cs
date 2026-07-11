@@ -7,9 +7,11 @@ using Microsoft.AspNetCore.Http.Extensions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using RemoteBrowserIsolation.Server.Data;
+using RemoteBrowserIsolation.Server.Models.Proxy;
 using RemoteBrowserIsolation.Server.Rest;
 using RemoteBrowserIsolation.Server.Rest.Admin;
 using RemoteBrowserIsolation.Server.Services;
+using RemoteBrowserIsolation.Server.Services.Proxy;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -21,8 +23,10 @@ builder.Services.ConfigureHttpJsonOptions(options =>
     options.SerializerOptions.Converters.Add(new JsonStringEnumConverter());
 });
 
-// Retained only for the /debug/fetch scaffolding endpoint — the main session flow renders
-// server-side via HeadlessBrowserSessionManager instead of downloading raw bytes.
+// Retained only for the /debug/fetch scaffolding endpoint (temporary, pre-product-flow diagnostic
+// -- see that endpoint's mapping below). The real browse surface no longer uses this: video mode
+// renders server-side via HeadlessBrowserSessionManager, and HTML mode is now served by the
+// TLS-intercepting proxy's OriginForwarder, not this GET-only, no-status/headers client.
 builder.Services.AddHttpClient<IPageDownloader, PageDownloader>(client =>
 {
     client.Timeout = TimeSpan.FromSeconds(30);
@@ -32,14 +36,36 @@ builder.Services.AddSingleton<IVideoTrackStreamer, VideoTrackStreamer>();
 builder.Services.AddSingleton<IInputEventForwarder, InputEventForwarder>();
 builder.Services.AddSingleton<IWebRtcSessionManager, WebRtcSessionManager>();
 
-// Needed so ContentRewriter (a singleton) can still read the current request's Host header per call
-// via IHttpContextAccessor -- see that class's GetServerOrigin comment for why.
-builder.Services.AddHttpContextAccessor();
+// Singleton -- must be shared/survive across every proxy connection, same reasoning as
+// WebRtcSessionManager. See RootCaStore's doc comment.
+builder.Services.AddSingleton<IRootCaStore, RootCaStore>();
 
-// Stateless (holds only an immutable AngleSharp configuration, no per-request or cross-request
-// mutable state) -- singleton is the simplest lifetime and avoids a DbContext-scoped dependency
-// this service doesn't need. See ContentRewriter's class doc comment.
-builder.Services.AddSingleton<IContentRewriter, ContentRewriter>();
+// Stateless (immutable AngleSharp config only) and HttpContext-free -- see its class doc comment.
+builder.Services.AddSingleton<IHtmlNoInputInjector, HtmlNoInputInjector>();
+
+// Singleton -- the mint cache must be shared and outlive any single proxy connection, same
+// reasoning as RootCaStore.
+builder.Services.AddSingleton<ILeafCertificateMinter, LeafCertificateMinter>();
+
+builder.Services.Configure<ProxyOptions>(builder.Configuration.GetSection("Proxy"));
+
+// The TLS-intercepting forward proxy listener -- a hand-rolled TcpListener, not Kestrel-hosted (see
+// TlsInterceptingProxyServer's class doc comment for why). Registered as a hosted service so it
+// starts/stops with the rest of the app.
+builder.Services.AddHostedService<TlsInterceptingProxyServer>();
+
+// Dedicated typed client for the TLS-intercepting proxy's origin fetches -- NOT the same HttpClient
+// as IPageDownloader (see OriginForwarder's doc comment for why). AllowAutoRedirect/UseCookies off
+// so 3xx and Set-Cookie relay to the browser as real headers instead of being swallowed here;
+// AutomaticDecompression off so the response body bytes always match its own Content-Encoding
+// header.
+builder.Services.AddHttpClient<IOriginForwarder, OriginForwarder>()
+    .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+    {
+        AllowAutoRedirect = false,
+        UseCookies = false,
+        AutomaticDecompression = System.Net.DecompressionMethods.None,
+    });
 
 // Scoped (default EF Core lifetime) is fine here — unlike WebRtcSessionManager's singleton, admin
 // and policy endpoints are only ever used within a normal HTTP request, never from an async
@@ -134,10 +160,12 @@ app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
 app.MapAdminAuthEndpoints();
 app.MapAdminSiteEndpoints();
 app.MapAdminLogEndpoints();
+app.MapAdminRootCaEndpoints();
 
-// Public browse surface: policy-resolution hint plus the two policy-gated ways to actually view a
-// site (video-mode WebRTC session, HTML-mode raw byte fetch). See Rest/PolicyEndpoints.cs and
-// Rest/SessionEndpoints.cs.
+// Public browse surface: policy-resolution hint plus the video-mode WebRTC session start. HTML
+// mode no longer has an app-level endpoint -- it's served directly by the TLS-intercepting proxy
+// (TlsInterceptingProxyServer), which every browser request already transits once the proxy is
+// configured. See Rest/PolicyEndpoints.cs and Rest/SessionEndpoints.cs.
 app.MapPolicyEndpoints();
 app.MapSessionEndpoints();
 

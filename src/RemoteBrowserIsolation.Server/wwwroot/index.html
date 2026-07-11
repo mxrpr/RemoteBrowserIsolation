@@ -11,17 +11,20 @@
     html, body { margin: 0; height: 100%; overflow: hidden; }
     #toolbar { display: flex; gap: 8px; padding: 8px; box-sizing: border-box; height: 48px; background: #f4f4f4; align-items: center; }
     #url { flex: 1; }
+    /* Set on <body> when this page was auto-launched from the video-mode interstitial's ?url=
+       link (see the bottom of this script) -- the url input/Fetch button are pointless there since
+       the session already started itself; only the status line (for errors) stays visible. */
+    body.autoLaunch #url, body.autoLaunch #fetchBtn { display: none; }
     /* Surfaces policy denials / request failures on the page itself — log() alone only reaches
        devtools, which most end users watching the toolbar never open. */
     #status { color: #b00020; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     #screen { display: block; width: 100vw; height: calc(100vh - 48px); background: #222; outline: none; object-fit: contain; }
-    /* HTML mode's rendered page shows in an iframe instead of the video element; only one of the
-       two is visible at a time (toggled in JS via the .hidden class below). */
-    #htmlScreen { display: block; width: 100vw; height: calc(100vh - 48px); background: #fff; border: none; }
-    /* #screen.hidden / #htmlScreen.hidden (ID + class) beats the bare #screen / #htmlScreen (ID
-       alone) rules above on specificity — a plain ".hidden { display: none }" would lose to those
-       and never actually hide either element. */
-    #screen.hidden, #htmlScreen.hidden { display: none; }
+    #screen.hidden { display: none; }
+    /* Shown instead of the video element for HTML-mode sites -- see the fetchBtn handler's
+       comment on why this page has no in-page HTML-mode flow anymore. */
+    #htmlInstructions { display: none; width: 100vw; height: calc(100vh - 48px); box-sizing: border-box; padding: 40px; overflow: auto; font-family: sans-serif; }
+    #htmlInstructions:not(.hidden) { display: block; }
+    #htmlInstructions code { background: #eee; padding: 1px 5px; border-radius: 4px; }
   </style>
 </head>
 <body>
@@ -33,13 +36,25 @@
   <!-- The rendered page arrives as a VP8 video track; the browser plays it like any video call.
        tabindex makes the element focusable so keyboard events can be captured and forwarded. -->
   <video id="screen" autoplay muted playsinline tabindex="0"></video>
-  <!-- HTML-mode target: raw page bytes loaded directly as the iframe's document. Sandbox
-       attribute is set per-mode in JS (see setHtmlSandbox). -->
-  <iframe id="htmlScreen" class="hidden"></iframe>
+  <!-- HTML mode has no in-page flow anymore: the TLS-intercepting proxy serves HTML-mode sites
+       directly to any request that transits it, so there's nothing for this page to fetch or
+       frame. This panel just tells the operator how to point their browser at the proxy instead. -->
+  <div id="htmlInstructions" class="hidden">
+    <h2>This site is HTML mode</h2>
+    <p>HTML-mode sites aren't loaded on this page anymore — they're served directly by this
+       server's TLS-intercepting proxy to any request that passes through it. To view one:</p>
+    <ol>
+      <li>Point this browser's proxy setting (HTTP and HTTPS) at this server's proxy port
+          (<code id="proxyHostHint">see appsettings.json "Proxy" section</code>).</li>
+      <li>Install this server's root CA certificate into the OS/browser trust store — download it
+          from the admin console's <a href="/admin/">Root CA</a> tab (requires an admin login).</li>
+      <li>Browse to the site directly in the address bar, as normal.</li>
+    </ol>
+  </div>
 
   <script>
     const video = document.getElementById('screen');
-    const htmlScreen = document.getElementById('htmlScreen');
+    const htmlInstructions = document.getElementById('htmlInstructions');
 
     // Session diagnostics go to the browser devtools console, not the page UI.
     function log(msg) {
@@ -160,36 +175,18 @@
     }
 
     // The active session's peer connection; closed before starting a new one (or before switching
-    // to an HTML-mode fetch) so re-fetching doesn't leave the previous session streaming (and
-    // burning server resources) in the background.
+    // to the HTML-mode instructions panel) so re-fetching doesn't leave the previous session
+    // streaming (and burning server resources) in the background.
     let activePc = null;
 
-    // Toggles which of the two render targets is visible. Only one mode is ever "live" at a time.
+    // Toggles which of the two panels is visible. Only one is ever "live" at a time.
     function showVideo() {
       video.classList.remove('hidden');
-      htmlScreen.classList.add('hidden');
+      htmlInstructions.classList.add('hidden');
     }
-    function showHtml() {
-      htmlScreen.classList.remove('hidden');
+    function showHtmlInstructions() {
+      htmlInstructions.classList.remove('hidden');
       video.classList.add('hidden');
-    }
-
-    // Sets the iframe's sandbox per HTML sub-mode. Both modes get allow-scripts: blocking scripts
-    // entirely was iteration 5's original (wrong) guess at what "no input" should also restrict —
-    // in practice it broke real sites outright (e.g. origo.hu, an Angular SSR app whose content sits
-    // in the DOM but stays CSS-hidden until client-side hydration JS reveals it; with scripts
-    // disabled that reveal never runs and the page is blank despite the HTML being fully present).
-    // "No text entering" (per policy_plan.md) is a narrower requirement than "no scripts", and is
-    // enforced separately via the CSS rule the server injects into the HTML itself (see
-    // ContentRewriter.RewriteHtml's noInput parameter), not via the sandbox attribute. Both modes
-    // deliberately omit allow-same-origin alongside allow-scripts: combining the two is a known
-    // sandbox-escape pattern (scripted content could then read this page's cookies/storage as if
-    // same-origin), so leaving it out keeps the framed page in a unique opaque origin regardless.
-    // HtmlNoInput additionally omits allow-forms — form submission is a text-entry pathway the CSS
-    // rule alone can't fully cover (a form can be submitted via a non-text control), so it stays
-    // blocked as a second layer on top of the CSS lock.
-    function setHtmlSandbox(mode) {
-      htmlScreen.setAttribute('sandbox', mode === 'HtmlAllowInput' ? 'allow-forms allow-scripts allow-popups' : 'allow-scripts allow-popups');
     }
 
     document.getElementById('fetchBtn').onclick = async () => {
@@ -225,12 +222,11 @@
       }
 
       if (mode.startsWith('Html')) {
-        // HTML modes never open a WebRTC session; the previous video session (if any) is already
-        // closed above so it doesn't keep streaming in the background.
-        showHtml();
-        setHtmlSandbox(mode);
-        htmlScreen.src = '/api/session/fetch?url=' + encodeURIComponent(url);
-        log('Loading HTML mode (' + mode + ') into iframe');
+        // HTML modes never open a WebRTC session, and there's no in-page fetch/frame flow for them
+        // anymore -- the TLS-intercepting proxy serves HTML-mode sites directly to any request
+        // that transits it. Point the operator at the setup instructions instead.
+        showHtmlInstructions();
+        log('This site is HTML mode (' + mode + ') -- browse it via the proxy, see instructions.');
         return;
       }
 
@@ -323,6 +319,18 @@
         pc.close();
       }
     };
+
+    // Entry point used by the TLS-intercepting proxy's video-mode interstitial
+    // (TlsInterceptingProxyServer.BuildVideoInterstitialResponseAsync): its "Open in video viewer"
+    // link points here with ?url=<target>, since starting a session is a JS-driven WebRTC offer
+    // flow, not a plain navigable link -- this pre-fills the toolbar and clicks Fetch for the
+    // caller, then hides the now-pointless url/Fetch controls (see the body.autoLaunch CSS rule).
+    const autoUrl = new URLSearchParams(window.location.search).get('url');
+    if (autoUrl) {
+      document.body.classList.add('autoLaunch');
+      document.getElementById('url').value = autoUrl;
+      document.getElementById('fetchBtn').click();
+    }
   </script>
 </body>
 </html>

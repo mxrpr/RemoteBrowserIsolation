@@ -15,6 +15,8 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
 
     public DbSet<RequestLog> RequestLogs => Set<RequestLog>();
 
+    public DbSet<RootCertificateAuthority> RootCertificateAuthorities => Set<RootCertificateAuthority>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         // Unique email so bootstrap-or-login can look up "the" admin unambiguously; comparisons in

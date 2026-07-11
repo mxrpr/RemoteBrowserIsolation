@@ -15,3 +15,6 @@ obj/
 
 # OS
 .DS_Store
+
+# Locally-generated root CA (private key material — never check in)
+certs/

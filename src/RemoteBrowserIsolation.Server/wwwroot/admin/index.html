@@ -187,6 +187,7 @@
         <nav class="sidebar">
           <button class="nav-item active" data-section="policiesSection">Policies</button>
           <button class="nav-item" data-section="logsSection">Logs</button>
+          <button class="nav-item" data-section="rootCaSection">Root CA</button>
         </nav>
 
         <div class="content">
@@ -218,6 +219,26 @@
                 <tbody id="logsBody"></tbody>
               </table>
             </div>
+          </section>
+
+          <!-- Root CA used by the TLS-intercepting proxy to mint per-hostname leaf certs (see
+               plans/9_TLS_proxy.md). Uploading replaces whatever CA was active before; the private
+               key itself is never sent back down to this page. -->
+          <section class="card hidden" id="rootCaSection">
+            <h2>Root CA</h2>
+            <div id="rootCaStatus">Loading...</div>
+            <form id="rootCaUploadForm">
+              <div style="margin: 14px 0;">
+                <label style="display:block; font-size:13px; color:var(--text-muted); margin-bottom:4px;">PFX file (cert + private key)</label>
+                <input id="rootCaFile" type="file" accept=".pfx,.p12" required />
+              </div>
+              <div style="margin: 14px 0;">
+                <label style="display:block; font-size:13px; color:var(--text-muted); margin-bottom:4px;">PFX password</label>
+                <input id="rootCaPassword" type="password" />
+              </div>
+              <button type="submit" class="primary">Upload</button>
+            </form>
+            <div id="rootCaError" class="error-row"></div>
           </section>
         </div>
       </div>
@@ -261,6 +282,7 @@
       mainBox.classList.remove('hidden');
       loadSites();
       loadLogs();
+      loadRootCa();
     }
 
     // Tracks the last-known bootstrap state so the login handler knows whether to demand a
@@ -448,6 +470,117 @@
         logsBody.innerHTML = '<tr><td colspan="6" class="error-row">' + e.message + '</td></tr>';
       }
     }
+
+    // Renders the active root CA's metadata (or "none configured"), plus download/delete controls
+    // built fresh each time so their closures always reference the CA that's actually loaded.
+    async function loadRootCa() {
+      const status = document.getElementById('rootCaStatus');
+      status.textContent = 'Loading...';
+      try {
+        const resp = await authedFetch('/api/admin/rootca');
+        if (resp.status === 404) {
+          status.textContent = 'No root CA is configured. Upload a PFX below to enable the TLS-intercepting proxy.';
+          return;
+        }
+        const ca = await resp.json();
+        status.innerHTML = '';
+
+        const table = document.createElement('table');
+        const rows = [
+          ['Subject', ca.subject],
+          ['Not before', ca.notBefore],
+          ['Not after', ca.notAfter],
+          ['Thumbprint', ca.thumbprint],
+          ['Uploaded', ca.uploadedAt],
+        ];
+        const tbody = document.createElement('tbody');
+        for (const [label, value] of rows) {
+          const tr = document.createElement('tr');
+          const th = document.createElement('th');
+          th.textContent = label;
+          const td = document.createElement('td');
+          td.textContent = value;
+          tr.appendChild(th);
+          tr.appendChild(td);
+          tbody.appendChild(tr);
+        }
+        table.appendChild(tbody);
+        status.appendChild(table);
+
+        const actions = document.createElement('div');
+        actions.style.marginTop = '12px';
+        actions.style.display = 'flex';
+        actions.style.gap = '8px';
+
+        // A plain <a href> can't attach the bearer token, so the public cert is fetched as a blob
+        // and downloaded via a throwaway object URL instead.
+        const downloadBtn = document.createElement('button');
+        downloadBtn.textContent = 'Download public certificate';
+        downloadBtn.onclick = async () => {
+          try {
+            const certResp = await authedFetch('/api/admin/rootca/certificate');
+            const blob = await certResp.blob();
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'rbi-root-ca.cer';
+            a.click();
+            URL.revokeObjectURL(url);
+          } catch (e) {
+            alert('Failed to download certificate: ' + e.message);
+          }
+        };
+        actions.appendChild(downloadBtn);
+
+        const deleteBtn = document.createElement('button');
+        deleteBtn.className = 'danger';
+        deleteBtn.textContent = 'Delete';
+        deleteBtn.onclick = async () => {
+          if (!confirm('Delete the active root CA? The proxy will refuse all HTTPS interception until a new one is uploaded.')) return;
+          try {
+            await authedFetch('/api/admin/rootca', { method: 'DELETE' });
+            loadRootCa();
+          } catch (e) {
+            alert('Failed to delete: ' + e.message);
+          }
+        };
+        actions.appendChild(deleteBtn);
+
+        status.appendChild(actions);
+      } catch (e) {
+        status.textContent = 'Failed to load: ' + e.message;
+      }
+    }
+
+    document.getElementById('rootCaUploadForm').onsubmit = async (e) => {
+      e.preventDefault();
+      const rootCaError = document.getElementById('rootCaError');
+      rootCaError.textContent = '';
+      const fileInput = document.getElementById('rootCaFile');
+      const password = document.getElementById('rootCaPassword').value;
+      if (!fileInput.files.length) {
+        rootCaError.textContent = 'A PFX file is required.';
+        return;
+      }
+
+      const formData = new FormData();
+      formData.append('pfx', fileInput.files[0]);
+      formData.append('password', password);
+
+      try {
+        const resp = await authedFetch('/api/admin/rootca', { method: 'POST', body: formData });
+        if (!resp.ok) {
+          const body = await resp.json().catch(() => ({}));
+          rootCaError.textContent = body.error || 'Upload failed.';
+          return;
+        }
+        fileInput.value = '';
+        document.getElementById('rootCaPassword').value = '';
+        loadRootCa();
+      } catch (e) {
+        rootCaError.textContent = 'Upload request failed: ' + e.message;
+      }
+    };
 
     refreshLoginHint();
   </script>
