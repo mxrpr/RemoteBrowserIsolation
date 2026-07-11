@@ -1,0 +1,419 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>RBI Admin</title>
+  <style>
+    /* Design tokens only — still a plain inline <style>, no framework/build step, matching the rest
+       of this project's zero-dependency convention. Dark mode follows the OS preference; there's no
+       JS-driven theme toggle since that'd be one more thing to wire up for an internal tool. */
+    :root {
+      --bg: #f3f4f7;
+      --surface: #ffffff;
+      --border: #e3e5ea;
+      --text: #1a1d23;
+      --text-muted: #6b7280;
+      --primary: #4f46e5;
+      --primary-hover: #4338ca;
+      --primary-text: #ffffff;
+      --danger: #dc2626;
+      --danger-hover: #b91c1c;
+      --row-hover: #f8f8fc;
+      --radius: 10px;
+      --shadow: 0 1px 3px rgba(16, 24, 40, 0.08), 0 1px 2px rgba(16, 24, 40, 0.04);
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0f1115;
+        --surface: #191c22;
+        --border: #2b2f38;
+        --text: #e6e8ec;
+        --text-muted: #9aa0ab;
+        --primary: #6366f1;
+        --primary-hover: #818cf8;
+        --primary-text: #ffffff;
+        --danger: #ef4444;
+        --danger-hover: #f87171;
+        --row-hover: #20242c;
+        --shadow: 0 1px 3px rgba(0, 0, 0, 0.5), 0 1px 2px rgba(0, 0, 0, 0.35);
+      }
+    }
+
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+    #app { min-height: 100%; }
+
+    h1 { font-size: 19px; font-weight: 600; margin: 0; }
+    h2 { font-size: 14px; font-weight: 600; margin: 0 0 12px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em; }
+
+    /* Login view: a single centered card over the full viewport height. */
+    #loginBox:not(.hidden) { display: flex; min-height: 100vh; align-items: center; justify-content: center; padding: 16px; }
+    .login-card {
+      width: 100%;
+      max-width: 340px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 28px;
+    }
+    .login-card h1 { margin-bottom: 4px; }
+    #loginHint { color: var(--text-muted); font-size: 13px; margin: 4px 0 16px; line-height: 1.4; }
+    #loginBox input {
+      display: block;
+      width: 100%;
+      margin-bottom: 10px;
+      padding: 9px 11px;
+      font-size: 14px;
+      color: var(--text);
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      outline: none;
+      transition: border-color 0.15s, box-shadow 0.15s;
+    }
+    #loginBox input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 20%, transparent); }
+    /* #loginBox input's ID selector otherwise outweighs the plain .hidden class (same specificity
+       trap that bit #screen/#htmlScreen in the main client) — this rule must win to actually hide
+       the confirm-password field on a returning-admin login. */
+    #loginBox input.hidden { display: none; }
+    #loginError { color: var(--danger); font-size: 13px; min-height: 18px; margin-top: 8px; }
+
+    /* Main view. */
+    #mainBox:not(.hidden) { max-width: 960px; margin: 0 auto; padding: 28px 20px 64px; }
+    .topbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 24px; }
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 20px;
+      margin-bottom: 20px;
+    }
+
+    .table-wrap { border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { padding: 9px 12px; font-size: 13px; text-align: left; border-bottom: 1px solid var(--border); }
+    th { background: var(--bg); color: var(--text-muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: 0.03em; }
+    tbody tr:last-child td { border-bottom: none; }
+    tbody tr:hover { background: var(--row-hover); }
+    td { color: var(--text); }
+
+    button {
+      cursor: pointer;
+      font: inherit;
+      font-size: 13px;
+      font-weight: 600;
+      padding: 8px 14px;
+      border-radius: 7px;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      color: var(--text);
+      transition: background 0.15s, border-color 0.15s, transform 0.05s;
+    }
+    button:hover { background: var(--row-hover); }
+    button:active { transform: translateY(1px); }
+    button.primary { background: var(--primary); border-color: var(--primary); color: var(--primary-text); }
+    button.primary:hover { background: var(--primary-hover); border-color: var(--primary-hover); }
+    button.danger { background: transparent; border-color: var(--border); color: var(--danger); }
+    button.danger:hover { background: var(--danger); border-color: var(--danger); color: #fff; }
+
+    select, #addSiteForm input {
+      font: inherit;
+      font-size: 13px;
+      padding: 7px 10px;
+      border-radius: 7px;
+      border: 1px solid var(--border);
+      background: var(--bg);
+      color: var(--text);
+    }
+
+    #addSiteForm { display: flex; gap: 8px; margin-top: 14px; align-items: center; flex-wrap: wrap; }
+    #addSiteForm input { flex: 1; min-width: 160px; }
+
+    .error-row { color: var(--danger); }
+    .hidden { display: none; }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <!-- Login view: shown until a token is obtained. -->
+    <div id="loginBox">
+      <div class="login-card">
+        <h1>RBI Admin</h1>
+        <div id="loginHint">Checking status...</div>
+        <input id="email" type="email" placeholder="email" />
+        <input id="password" type="password" placeholder="password" />
+        <!-- Only shown/required on bootstrap (no admin yet) — a returning admin just needs one
+             password field, confirmation only matters when this login call is about to create the
+             account. -->
+        <input id="passwordConfirm" type="password" placeholder="confirm password" class="hidden" />
+        <button id="loginBtn" class="primary">Log in</button>
+        <div id="loginError"></div>
+      </div>
+    </div>
+
+    <!-- Main view: shown once logged in. -->
+    <div id="mainBox" class="hidden">
+      <div class="topbar">
+        <h1>RBI Admin</h1>
+        <button id="logoutBtn">Log out</button>
+      </div>
+
+      <section class="card">
+        <h2>Site policies</h2>
+        <div class="table-wrap">
+          <table id="sitesTable">
+            <thead><tr><th>Host pattern</th><th>View mode</th><th>Updated</th><th></th></tr></thead>
+            <tbody id="sitesBody"></tbody>
+          </table>
+        </div>
+        <form id="addSiteForm">
+          <input id="newHost" type="text" placeholder="example.com" required />
+          <select id="newMode">
+            <option>HtmlAllowInput</option>
+            <option>HtmlNoInput</option>
+            <option>VideoAllowInput</option>
+            <option>VideoNoInput</option>
+          </select>
+          <button type="submit" class="primary">Add site</button>
+        </form>
+      </section>
+
+      <section class="card">
+        <h2>Request log</h2>
+        <div class="table-wrap">
+          <table id="logsTable">
+            <thead><tr><th>Time (UTC)</th><th>Url</th><th>Host</th><th>Decision</th><th>Allowed</th><th>Client IP</th></tr></thead>
+            <tbody id="logsBody"></tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <script>
+    // In-memory only: a page refresh loses the token and drops back to the login form. Deliberately
+    // not persisted to localStorage/cookies — no refresh-token flow exists in this iteration, so
+    // "session survives a refresh" isn't a requirement worth the added complexity/attack surface.
+    let token = null;
+
+    const loginBox = document.getElementById('loginBox');
+    const mainBox = document.getElementById('mainBox');
+    const loginHint = document.getElementById('loginHint');
+    const loginError = document.getElementById('loginError');
+
+    // Wrapper around fetch that attaches the bearer token and, on a 401 (expired/invalid/missing
+    // token), drops the UI back to the login form instead of leaving the page in a broken state.
+    async function authedFetch(url, options = {}) {
+      const headers = Object.assign({}, options.headers, { Authorization: 'Bearer ' + token });
+      const resp = await fetch(url, Object.assign({}, options, { headers }));
+      if (resp.status === 401) {
+        token = null;
+        showLogin();
+        throw new Error('Session expired, please log in again.');
+      }
+      return resp;
+    }
+
+    // Switches the visible view back to the login form and refreshes the bootstrap-vs-login hint.
+    function showLogin() {
+      mainBox.classList.add('hidden');
+      loginBox.classList.remove('hidden');
+      refreshLoginHint();
+    }
+
+    // Switches the visible view to the main admin UI and loads its two data tables.
+    function showMain() {
+      loginBox.classList.add('hidden');
+      mainBox.classList.remove('hidden');
+      loadSites();
+      loadLogs();
+    }
+
+    // Tracks the last-known bootstrap state so the login handler knows whether to demand a
+    // matching confirm-password (bootstrap only — a returning admin already has one on file).
+    let isBootstrapped = true;
+    const passwordConfirm = document.getElementById('passwordConfirm');
+
+    // Probes GET /api/admin/auth/status to tell a first-time operator (no admin yet, this login
+    // will create one) apart from a returning admin (normal login). Also toggles the
+    // confirm-password field: it's only relevant (and only shown) while no admin exists yet, since
+    // that's the one login call that actually sets the password on file.
+    async function refreshLoginHint() {
+      try {
+        const resp = await fetch('/api/admin/auth/status');
+        const { bootstrapped } = await resp.json();
+        isBootstrapped = bootstrapped;
+        passwordConfirm.classList.toggle('hidden', bootstrapped);
+        passwordConfirm.value = '';
+        loginHint.textContent = bootstrapped
+          ? 'Log in with your admin email and password.'
+          : 'No admin exists yet — the first successful login here creates the admin account. Enter the new password twice.';
+      } catch (e) {
+        loginHint.textContent = 'Could not reach server: ' + e.message;
+      }
+    }
+
+    document.getElementById('loginBtn').onclick = async () => {
+      loginError.textContent = '';
+      const email = document.getElementById('email').value.trim();
+      const password = document.getElementById('password').value;
+      if (!email || !password) {
+        loginError.textContent = 'Email and password are required.';
+        return;
+      }
+      // Confirmation only matters on bootstrap: this is the one login call that sets the password
+      // on file, so a typo here would otherwise lock the operator out with no recovery path (no
+      // "forgot password" flow exists in this iteration).
+      if (!isBootstrapped && password !== passwordConfirm.value) {
+        loginError.textContent = 'Passwords do not match.';
+        return;
+      }
+
+      try {
+        const resp = await fetch('/api/admin/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, password }),
+        });
+        if (!resp.ok) {
+          loginError.textContent = 'Login failed (wrong credentials?).';
+          return;
+        }
+        const { token: newToken } = await resp.json();
+        token = newToken;
+        showMain();
+      } catch (e) {
+        loginError.textContent = 'Login request failed: ' + e.message;
+      }
+    };
+
+    document.getElementById('logoutBtn').onclick = () => {
+      token = null;
+      showLogin();
+    };
+
+    // Renders the current SitePolicy list into #sitesBody, with an inline view-mode <select> (PUT on
+    // change) and a delete button per row.
+    async function loadSites() {
+      const sitesBody = document.getElementById('sitesBody');
+      sitesBody.innerHTML = '<tr><td colspan="4">Loading...</td></tr>';
+      try {
+        const resp = await authedFetch('/api/admin/sites');
+        const sites = await resp.json();
+        sitesBody.innerHTML = '';
+        for (const site of sites) {
+          sitesBody.appendChild(renderSiteRow(site));
+        }
+      } catch (e) {
+        sitesBody.innerHTML = '<tr><td colspan="4" class="error-row">' + e.message + '</td></tr>';
+      }
+    }
+
+    function renderSiteRow(site) {
+      const tr = document.createElement('tr');
+
+      const hostTd = document.createElement('td');
+      hostTd.textContent = site.hostPattern;
+      tr.appendChild(hostTd);
+
+      const modeTd = document.createElement('td');
+      const select = document.createElement('select');
+      for (const mode of ['HtmlAllowInput', 'HtmlNoInput', 'VideoAllowInput', 'VideoNoInput']) {
+        const opt = document.createElement('option');
+        opt.value = mode;
+        opt.textContent = mode;
+        if (mode === site.viewMode) opt.selected = true;
+        select.appendChild(opt);
+      }
+      select.onchange = async () => {
+        try {
+          await authedFetch('/api/admin/sites/' + site.id, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ hostPattern: site.hostPattern, viewMode: select.value }),
+          });
+        } catch (e) {
+          alert('Failed to update: ' + e.message);
+          loadSites();
+        }
+      };
+      modeTd.appendChild(select);
+      tr.appendChild(modeTd);
+
+      const updatedTd = document.createElement('td');
+      updatedTd.textContent = site.updatedAt;
+      tr.appendChild(updatedTd);
+
+      const actionsTd = document.createElement('td');
+      const delBtn = document.createElement('button');
+      delBtn.className = 'danger';
+      delBtn.textContent = 'Delete';
+      delBtn.onclick = async () => {
+        if (!confirm('Delete policy for ' + site.hostPattern + '?')) return;
+        try {
+          await authedFetch('/api/admin/sites/' + site.id, { method: 'DELETE' });
+          loadSites();
+        } catch (e) {
+          alert('Failed to delete: ' + e.message);
+        }
+      };
+      actionsTd.appendChild(delBtn);
+      tr.appendChild(actionsTd);
+
+      return tr;
+    }
+
+    document.getElementById('addSiteForm').onsubmit = async (e) => {
+      e.preventDefault();
+      const hostPattern = document.getElementById('newHost').value.trim();
+      const viewMode = document.getElementById('newMode').value;
+      if (!hostPattern) return;
+      try {
+        await authedFetch('/api/admin/sites', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ hostPattern, viewMode }),
+        });
+        document.getElementById('newHost').value = '';
+        loadSites();
+      } catch (e) {
+        alert('Failed to add site: ' + e.message);
+      }
+    };
+
+    // Renders the most recent request-log rows (newest first, matches the server's default order).
+    async function loadLogs() {
+      const logsBody = document.getElementById('logsBody');
+      logsBody.innerHTML = '<tr><td colspan="6">Loading...</td></tr>';
+      try {
+        const resp = await authedFetch('/api/admin/logs?limit=50&offset=0');
+        const logs = await resp.json();
+        logsBody.innerHTML = '';
+        for (const entry of logs) {
+          // Built with textContent, not innerHTML: url/host are logged from unauthenticated
+          // /api/policy/resolve and /api/session/* calls, so they're attacker-influenced strings
+          // that must never be interpreted as markup in the admin UI.
+          const tr = document.createElement('tr');
+          for (const value of [entry.timestamp, entry.url, entry.host, entry.decision, entry.allowed, entry.clientIp || '']) {
+            const td = document.createElement('td');
+            td.textContent = value;
+            tr.appendChild(td);
+          }
+          logsBody.appendChild(tr);
+        }
+      } catch (e) {
+        logsBody.innerHTML = '<tr><td colspan="6" class="error-row">' + e.message + '</td></tr>';
+      }
+    }
+
+    refreshLoginHint();
+  </script>
+</body>
+</html>

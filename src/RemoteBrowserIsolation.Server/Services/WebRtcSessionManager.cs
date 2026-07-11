@@ -6,7 +6,11 @@ namespace RemoteBrowserIsolation.Server.Services;
 
 public interface IWebRtcSessionManager
 {
-    Task<string> CreateSessionAsync(string offerSdp, Uri targetUrl, int? viewportWidth = null, int? viewportHeight = null, CancellationToken cancellationToken = default);
+    // wireInput controls whether the input data channel is ever hooked up to the rendered page —
+    // false is what makes VideoNoInput server-authoritative: client input is simply never replayed,
+    // not just visually/CSS-blocked, so a malicious client can't bypass it by sending raw channel
+    // messages.
+    Task<string> CreateSessionAsync(string offerSdp, Uri targetUrl, int? viewportWidth = null, int? viewportHeight = null, bool wireInput = true, CancellationToken cancellationToken = default);
 }
 
 // Orchestrates one WebRTC session end to end: negotiates the peer connection with a send-only VP8
@@ -39,7 +43,7 @@ public sealed class WebRtcSessionManager(
     // here to look it up again on teardown.
     private readonly ConcurrentDictionary<RTCPeerConnection, HeadlessSession> activeSessions = new();
 
-    public async Task<string> CreateSessionAsync(string offerSdp, Uri targetUrl, int? viewportWidth = null, int? viewportHeight = null, CancellationToken cancellationToken = default)
+    public async Task<string> CreateSessionAsync(string offerSdp, Uri targetUrl, int? viewportWidth = null, int? viewportHeight = null, bool wireInput = true, CancellationToken cancellationToken = default)
     {
         var width = Math.Clamp(viewportWidth ?? DefaultViewportWidth, MinViewportWidth, MaxViewportWidth);
         var height = Math.Clamp(viewportHeight ?? DefaultViewportHeight, MinViewportHeight, MaxViewportHeight);
@@ -65,7 +69,7 @@ public sealed class WebRtcSessionManager(
             if (state == RTCPeerConnectionState.connected && !started)
             {
                 started = true;
-                _ = StartRenderingSessionAsync(pc, inputChannel, targetUrl, width, height);
+                _ = StartRenderingSessionAsync(pc, inputChannel, targetUrl, width, height, wireInput);
             }
 
             OnConnectionStateChanged(pc, state, targetUrl);
@@ -87,7 +91,7 @@ public sealed class WebRtcSessionManager(
     // Fired once the peer connection is established: launches the headless-browser session, wires
     // input replay to it, and starts the video stream. Runs fire-and-forget from the state-change
     // callback, after the HTTP request that created the session has already completed.
-    private async Task StartRenderingSessionAsync(RTCPeerConnection pc, RTCDataChannel inputChannel, Uri targetUrl, int viewportWidth, int viewportHeight)
+    private async Task StartRenderingSessionAsync(RTCPeerConnection pc, RTCDataChannel inputChannel, Uri targetUrl, int viewportWidth, int viewportHeight, bool wireInput)
     {
         try
         {
@@ -102,7 +106,14 @@ public sealed class WebRtcSessionManager(
                 return;
             }
 
-            inputEventForwarder.Wire(inputChannel, session.Page, targetUrl);
+            // Skipped entirely for VideoNoInput: not wiring the forwarder means messages arriving on
+            // the input channel are simply never read, so there's no code path by which client input
+            // could reach the page — a stronger guarantee than filtering events after the fact.
+            if (wireInput)
+            {
+                inputEventForwarder.Wire(inputChannel, session.Page, targetUrl);
+            }
+
             await videoTrackStreamer.StartAsync(pc, session, targetUrl);
 
             logger.LogInformation("Started rendering session for {Url} at {Width}x{Height}", targetUrl, viewportWidth, viewportHeight);

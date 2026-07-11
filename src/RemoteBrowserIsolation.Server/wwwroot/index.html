@@ -9,26 +9,51 @@
        whatever the server rendered. Input coordinates are converted from CSS space to stream
        space on send. */
     html, body { margin: 0; height: 100%; overflow: hidden; }
-    #toolbar { display: flex; gap: 8px; padding: 8px; box-sizing: border-box; height: 48px; background: #f4f4f4; }
+    #toolbar { display: flex; gap: 8px; padding: 8px; box-sizing: border-box; height: 48px; background: #f4f4f4; align-items: center; }
     #url { flex: 1; }
+    /* Surfaces policy denials / request failures on the page itself — log() alone only reaches
+       devtools, which most end users watching the toolbar never open. */
+    #status { color: #b00020; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     #screen { display: block; width: 100vw; height: calc(100vh - 48px); background: #222; outline: none; object-fit: contain; }
+    /* HTML mode's rendered page shows in an iframe instead of the video element; only one of the
+       two is visible at a time (toggled in JS via the .hidden class below). */
+    #htmlScreen { display: block; width: 100vw; height: calc(100vh - 48px); background: #fff; border: none; }
+    /* #screen.hidden / #htmlScreen.hidden (ID + class) beats the bare #screen / #htmlScreen (ID
+       alone) rules above on specificity — a plain ".hidden { display: none }" would lose to those
+       and never actually hide either element. */
+    #screen.hidden, #htmlScreen.hidden { display: none; }
   </style>
 </head>
 <body>
   <div id="toolbar">
     <input id="url" type="text" placeholder="https://example.com" value="https://example.com" />
     <button id="fetchBtn">Fetch</button>
+    <span id="status"></span>
   </div>
   <!-- The rendered page arrives as a VP8 video track; the browser plays it like any video call.
        tabindex makes the element focusable so keyboard events can be captured and forwarded. -->
   <video id="screen" autoplay muted playsinline tabindex="0"></video>
+  <!-- HTML-mode target: raw page bytes loaded directly as the iframe's document. Sandbox
+       attribute is set per-mode in JS (see setHtmlSandbox). -->
+  <iframe id="htmlScreen" class="hidden"></iframe>
 
   <script>
     const video = document.getElementById('screen');
+    const htmlScreen = document.getElementById('htmlScreen');
 
     // Session diagnostics go to the browser devtools console, not the page UI.
     function log(msg) {
       console.log('[rbi] ' + msg);
+    }
+
+    // Policy denials and request failures also need to be visible to whoever is actually watching
+    // the toolbar, not just devtools — most end users never open the console.
+    const statusEl = document.getElementById('status');
+    function showStatus(msg) {
+      statusEl.textContent = msg;
+    }
+    function clearStatus() {
+      statusEl.textContent = '';
     }
 
     function waitForIceGatheringComplete(pc) {
@@ -134,19 +159,82 @@
       video.addEventListener('keyup', (e) => { e.preventDefault(); send({ type: 'keyup', key: e.key }); });
     }
 
-    // The active session's peer connection; closed before starting a new one so re-fetching
-    // doesn't leave the previous session streaming (and burning server resources) in the background.
+    // The active session's peer connection; closed before starting a new one (or before switching
+    // to an HTML-mode fetch) so re-fetching doesn't leave the previous session streaming (and
+    // burning server resources) in the background.
     let activePc = null;
+
+    // Toggles which of the two render targets is visible. Only one mode is ever "live" at a time.
+    function showVideo() {
+      video.classList.remove('hidden');
+      htmlScreen.classList.add('hidden');
+    }
+    function showHtml() {
+      htmlScreen.classList.remove('hidden');
+      video.classList.add('hidden');
+    }
+
+    // Sets the iframe's sandbox per HTML sub-mode. Both modes get allow-scripts: blocking scripts
+    // entirely was iteration 5's original (wrong) guess at what "no input" should also restrict —
+    // in practice it broke real sites outright (e.g. origo.hu, an Angular SSR app whose content sits
+    // in the DOM but stays CSS-hidden until client-side hydration JS reveals it; with scripts
+    // disabled that reveal never runs and the page is blank despite the HTML being fully present).
+    // "No text entering" (per policy_plan.md) is a narrower requirement than "no scripts", and is
+    // enforced separately via the CSS rule the server injects into the HTML itself (see
+    // ContentRewriter.RewriteHtml's noInput parameter), not via the sandbox attribute. Both modes
+    // deliberately omit allow-same-origin alongside allow-scripts: combining the two is a known
+    // sandbox-escape pattern (scripted content could then read this page's cookies/storage as if
+    // same-origin), so leaving it out keeps the framed page in a unique opaque origin regardless.
+    // HtmlNoInput additionally omits allow-forms — form submission is a text-entry pathway the CSS
+    // rule alone can't fully cover (a form can be submitted via a non-text control), so it stays
+    // blocked as a second layer on top of the CSS lock.
+    function setHtmlSandbox(mode) {
+      htmlScreen.setAttribute('sandbox', mode === 'HtmlAllowInput' ? 'allow-forms allow-scripts allow-popups' : 'allow-scripts allow-popups');
+    }
 
     document.getElementById('fetchBtn').onclick = async () => {
       const url = document.getElementById('url').value.trim();
       if (!url) return;
+
+      clearStatus();
+
+      // Resolve policy first: purely a UI hint (the server re-checks on every real request below),
+      // but it lets the client pick video vs HTML vs "blocked" without guessing.
+      log('Resolving policy for ' + url);
+      let mode;
+      try {
+        const resolveResp = await fetch('/api/policy/resolve?url=' + encodeURIComponent(url));
+        if (!resolveResp.ok) {
+          const err = await resolveResp.json().catch(() => ({}));
+          const reason = err.error || (resolveResp.status === 403 ? 'This site is not permitted.' : 'Request failed (' + resolveResp.status + ').');
+          log('Policy denied: ' + reason);
+          showStatus(reason);
+          return;
+        }
+        ({ mode } = await resolveResp.json());
+        log('Resolved mode: ' + mode);
+      } catch (e) {
+        log('Policy resolve failed: ' + e.message);
+        showStatus('Could not reach server: ' + e.message);
+        return;
+      }
 
       if (activePc) {
         activePc.close();
         activePc = null;
       }
 
+      if (mode.startsWith('Html')) {
+        // HTML modes never open a WebRTC session; the previous video session (if any) is already
+        // closed above so it doesn't keep streaming in the background.
+        showHtml();
+        setHtmlSandbox(mode);
+        htmlScreen.src = '/api/session/fetch?url=' + encodeURIComponent(url);
+        log('Loading HTML mode (' + mode + ') into iframe');
+        return;
+      }
+
+      showVideo();
       log('Starting session for ' + url);
 
       const pc = new RTCPeerConnection();
@@ -184,7 +272,17 @@
       // negotiated + fixed id: must match the id the server uses (see WebRtcSessionManager.cs) —
       // carries input events client -> server as JSON.
       const inputChannel = pc.createDataChannel('input-events', { negotiated: true, id: 1 });
-      inputChannel.onopen = () => { log('Input channel open'); wireInputCapture(inputChannel); };
+      inputChannel.onopen = () => {
+        log('Input channel open');
+        // VideoNoInput: the server never wires this channel's messages to the page (see
+        // WebRtcSessionManager's wireInput flag), so sending events would be harmless but
+        // pointless. Skip attaching the capture listeners entirely rather than capture-and-drop.
+        if (mode === 'VideoNoInput') {
+          log('VideoNoInput: skipping input capture (server drops it anyway)');
+        } else {
+          wireInputCapture(inputChannel);
+        }
+      };
       inputChannel.onerror = (e) => log('Input channel error: ' + e.error);
 
       try {
@@ -209,8 +307,9 @@
         });
 
         if (!resp.ok) {
-          const err = await resp.json();
+          const err = await resp.json().catch(() => ({}));
           log('Server error: ' + JSON.stringify(err));
+          showStatus(err.error || 'Server rejected the session (' + resp.status + ').');
           pc.close();
           return;
         }
@@ -220,6 +319,7 @@
         log('Remote description set, waiting for video...');
       } catch (e) {
         log('Error: ' + e.message);
+        showStatus('Error: ' + e.message);
         pc.close();
       }
     };

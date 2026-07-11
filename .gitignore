@@ -3,6 +3,11 @@ bin/
 obj/
 *.user
 
+# Local SQLite dev database (created at runtime from ConnectionStrings:Sqlite; never checked in)
+*.db
+*.db-shm
+*.db-wal
+
 # IDE
 .vs/
 .vscode/
