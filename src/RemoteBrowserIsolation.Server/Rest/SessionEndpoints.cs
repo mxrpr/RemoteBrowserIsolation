@@ -34,14 +34,15 @@ public static class SessionEndpoints
                 return Results.Json(new { error = "This site's policy requires HTML mode, not video." }, statusCode: StatusCodes.Status409Conflict);
             }
 
-            // Only VideoAllowInput and VideoNoInput remain. wireInput is false only for
-            // VideoNoInput, which is what makes that mode's "no input" server-authoritative.
-            bool wireInput = mode == ViewMode.VideoAllowInput;
+            // Only VideoAllowInput and VideoNoInput remain. The input channel is always wired (mouse
+            // must work in both modes); allowKeyboard is false only for VideoNoInput, which is what
+            // makes that mode's "no keyboard" restriction server-authoritative.
+            bool allowKeyboard = mode == ViewMode.VideoAllowInput;
 
             try
             {
                 await requestLog.LogAsync(targetUrl, mode.ToString()!, allowed: true, clientIp);
-                string answerSdp = await sessionManager.CreateSessionAsync(request.Sdp, targetUrl, request.Width, request.Height, wireInput);
+                string answerSdp = await sessionManager.CreateSessionAsync(request.Sdp, targetUrl, request.Width, request.Height, allowKeyboard);
                 return Results.Ok(new AnswerResponse(answerSdp));
             }
             catch (InvalidOperationException ex)

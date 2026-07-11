@@ -1,16 +1,22 @@
 using System.Collections.Concurrent;
+using System.Net;
+using System.Text.RegularExpressions;
+using Microsoft.Extensions.Options;
+using RemoteBrowserIsolation.Server.Models;
 using SIPSorcery.Net;
+using SIPSorcery.Sys;
 using SIPSorceryMedia.Abstractions;
 
 namespace RemoteBrowserIsolation.Server.Services;
 
 public interface IWebRtcSessionManager
 {
-    // wireInput controls whether the input data channel is ever hooked up to the rendered page —
-    // false is what makes VideoNoInput server-authoritative: client input is simply never replayed,
-    // not just visually/CSS-blocked, so a malicious client can't bypass it by sending raw channel
-    // messages.
-    Task<string> CreateSessionAsync(string offerSdp, Uri targetUrl, int? viewportWidth = null, int? viewportHeight = null, bool wireInput = true, CancellationToken cancellationToken = default);
+    // The input data channel is always wired up (mouse must work in both video modes). allowKeyboard
+    // controls whether keyboard events are replayed once they arrive — false is what makes
+    // VideoNoInput's keyboard restriction server-authoritative: a malicious client sending raw
+    // keydown/keyup messages on the channel still can't get them replayed, since the forwarder drops
+    // them before dispatch rather than relying on the client not to send them.
+    Task<string> CreateSessionAsync(string offerSdp, Uri targetUrl, int? viewportWidth = null, int? viewportHeight = null, bool allowKeyboard = true, CancellationToken cancellationToken = default);
 }
 
 // Orchestrates one WebRTC session end to end: negotiates the peer connection with a send-only VP8
@@ -22,8 +28,22 @@ public sealed class WebRtcSessionManager(
     IHeadlessBrowserSessionManager browserSessionManager,
     IVideoTrackStreamer videoTrackStreamer,
     IInputEventForwarder inputEventForwarder,
+    IOptions<WebRtcOptions> webRtcOptions,
     ILogger<WebRtcSessionManager> logger) : IWebRtcSessionManager
 {
+    // Host candidate address/port lines in the answer SDP, e.g.
+    // "a=candidate:1 1 udp 2130706431 172.17.0.2 40000 typ host ..." -- group 1 is the address to
+    // rewrite so a browser outside the container can reach the published UDP port range.
+    private static readonly Regex HostCandidateAddressRegex = new(
+        @"(a=candidate:\S+ \d+ \S+ \d+ )(\S+)( \d+ typ host)",
+        RegexOptions.Compiled);
+
+    // Session/media-level connection address line, e.g. "c=IN IP4 172.17.0.2" -- rewritten
+    // alongside the host candidates for the same reason.
+    private static readonly Regex ConnectionAddressRegex = new(
+        @"(c=IN IP4 )(\S+)",
+        RegexOptions.Compiled);
+
     // Bounds for the client-requested viewport. The lower bound guards against degenerate/abusive
     // values; the upper bound caps the VP8 encoder's per-frame CPU cost (~15-20ms at 720p —
     // bandwidth is no longer the constraint now that frames travel over RTP instead of the
@@ -43,12 +63,17 @@ public sealed class WebRtcSessionManager(
     // here to look it up again on teardown.
     private readonly ConcurrentDictionary<RTCPeerConnection, HeadlessSession> activeSessions = new();
 
-    public async Task<string> CreateSessionAsync(string offerSdp, Uri targetUrl, int? viewportWidth = null, int? viewportHeight = null, bool wireInput = true, CancellationToken cancellationToken = default)
+    public async Task<string> CreateSessionAsync(string offerSdp, Uri targetUrl, int? viewportWidth = null, int? viewportHeight = null, bool allowKeyboard = true, CancellationToken cancellationToken = default)
     {
         var width = Math.Clamp(viewportWidth ?? DefaultViewportWidth, MinViewportWidth, MaxViewportWidth);
         var height = Math.Clamp(viewportHeight ?? DefaultViewportHeight, MinViewportHeight, MaxViewportHeight);
 
-        var pc = new RTCPeerConnection();
+        // Pin the ICE/RTP UDP socket to a fixed, publishable port range instead of an OS-chosen
+        // ephemeral port -- required so a Docker container can publish exactly these ports (see
+        // plans/10_docker_image.md).
+        var options = webRtcOptions.Value;
+        var portRange = new PortRange(options.UdpPortStart, options.UdpPortEnd, shuffle: false, randomSeed: null);
+        var pc = new RTCPeerConnection(configuration: null, bindPort: 0, portRange: portRange, videoAsPrimary: false);
 
         // The video track must be added before answering so the SDP answer accepts the client
         // offer's recvonly video section with VP8.
@@ -69,7 +94,7 @@ public sealed class WebRtcSessionManager(
             if (state == RTCPeerConnectionState.connected && !started)
             {
                 started = true;
-                _ = StartRenderingSessionAsync(pc, inputChannel, targetUrl, width, height, wireInput);
+                _ = StartRenderingSessionAsync(pc, inputChannel, targetUrl, width, height, allowKeyboard);
             }
 
             OnConnectionStateChanged(pc, state, targetUrl);
@@ -85,13 +110,23 @@ public sealed class WebRtcSessionManager(
         var answer = pc.createAnswer(new RTCAnswerOptions { X_WaitForIceGatheringToComplete = true });
         await pc.setLocalDescription(answer);
 
-        return pc.localDescription.sdp.ToString();
+        return RewriteHostCandidateAddresses(pc.localDescription.sdp.ToString(), options.AdvertisedIp);
+    }
+
+    // Rewrites the answer SDP's session-level connection address and host-candidate addresses to a
+    // configured advertised IP, in place of the container's internal (unreachable-from-outside)
+    // address. Only host candidates are touched -- no STUN/TURN is configured, so no srflx/relay
+    // candidates exist to preserve.
+    private static string RewriteHostCandidateAddresses(string sdp, string advertisedIp)
+    {
+        var rewritten = ConnectionAddressRegex.Replace(sdp, $"${{1}}{advertisedIp}");
+        return HostCandidateAddressRegex.Replace(rewritten, $"${{1}}{advertisedIp}$3");
     }
 
     // Fired once the peer connection is established: launches the headless-browser session, wires
     // input replay to it, and starts the video stream. Runs fire-and-forget from the state-change
     // callback, after the HTTP request that created the session has already completed.
-    private async Task StartRenderingSessionAsync(RTCPeerConnection pc, RTCDataChannel inputChannel, Uri targetUrl, int viewportWidth, int viewportHeight, bool wireInput)
+    private async Task StartRenderingSessionAsync(RTCPeerConnection pc, RTCDataChannel inputChannel, Uri targetUrl, int viewportWidth, int viewportHeight, bool allowKeyboard)
     {
         try
         {
@@ -106,13 +141,10 @@ public sealed class WebRtcSessionManager(
                 return;
             }
 
-            // Skipped entirely for VideoNoInput: not wiring the forwarder means messages arriving on
-            // the input channel are simply never read, so there's no code path by which client input
-            // could reach the page — a stronger guarantee than filtering events after the fact.
-            if (wireInput)
-            {
-                inputEventForwarder.Wire(inputChannel, session.Page, targetUrl);
-            }
+            // Always wired: mouse input must reach the page in both video modes. allowKeyboard governs
+            // whether the forwarder actually replays keydown/keyup once they arrive (see
+            // InputEventForwarder.Wire).
+            inputEventForwarder.Wire(inputChannel, session.Page, targetUrl, allowKeyboard);
 
             await videoTrackStreamer.StartAsync(pc, session, targetUrl);
 

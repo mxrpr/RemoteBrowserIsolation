@@ -233,7 +233,14 @@
       showVideo();
       log('Starting session for ' + url);
 
-      const pc = new RTCPeerConnection();
+      // A STUN server is required even for same-host browser<->container connections: Chrome/Firefox
+      // hide host candidates' real IP behind a random mDNS ".local" name by default, and the
+      // server (running in a Docker bridge network with no multicast reachability to the host) can
+      // never resolve that name -- see ICE-failure diagnosis in git history. STUN doesn't fix the
+      // host candidate itself, but makes the browser also gather a server-reflexive candidate that
+      // is not mDNS-obfuscated, giving the server a real address it can complete connectivity
+      // checks against.
+      const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
       activePc = pc;
 
       // Receive-only video: the server answers with a send-only VP8 track carrying the rendered
@@ -270,16 +277,14 @@
       const inputChannel = pc.createDataChannel('input-events', { negotiated: true, id: 1 });
       inputChannel.onopen = () => {
         log('Input channel open');
-        // VideoNoInput: the server never wires this channel's messages to the page (see
-        // WebRtcSessionManager's wireInput flag), so sending events would be harmless but
-        // pointless. Skip attaching the capture listeners entirely rather than capture-and-drop.
-        if (mode === 'VideoNoInput') {
-          log('VideoNoInput: skipping input capture (server drops it anyway)');
-        } else {
-          wireInputCapture(inputChannel);
-        }
+        // Mouse must always be captured -- VideoNoInput only drops keyboard events, server-side
+        // (see InputEventForwarder.HandleAsync's allowKeyboard check). Sending keyboard events here
+        // is harmless even in VideoNoInput (the server drops them before replay), so capture is
+        // unconditional; no mode branching needed here.
+        wireInputCapture(inputChannel);
       };
       inputChannel.onerror = (e) => log('Input channel error: ' + e.error);
+      inputChannel.onclose = () => log('Input channel closed');
 
       try {
         const offer = await pc.createOffer();

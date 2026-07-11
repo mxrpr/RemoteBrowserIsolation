@@ -9,7 +9,9 @@ namespace RemoteBrowserIsolation.Server.Services;
 
 public interface IInputEventForwarder
 {
-    void Wire(RTCDataChannel inputChannel, IPage page, Uri targetUrl);
+    // allowKeyboard: false drops keydown/keyup before replay (VideoNoInput) -- mouse events (move,
+    // down, up, wheel) are always replayed regardless.
+    void Wire(RTCDataChannel inputChannel, IPage page, Uri targetUrl, bool allowKeyboard = true);
 }
 
 // Decodes JSON InputEvent messages arriving on the input data channel and replays them against the
@@ -23,7 +25,7 @@ public sealed class InputEventForwarder(ILogger<InputEventForwarder> logger) : I
     // replayed by a single consumer loop: input order MUST be preserved (a mouseup replayed before
     // its mousedown is a lost click), so events cannot be dispatched fire-and-forget in parallel.
     // The queue also keeps SIPSorcery's receive thread unblocked while Playwright replays.
-    public void Wire(RTCDataChannel inputChannel, IPage page, Uri targetUrl)
+    public void Wire(RTCDataChannel inputChannel, IPage page, Uri targetUrl, bool allowKeyboard = true)
     {
         var queue = Channel.CreateUnbounded<byte[]>(new UnboundedChannelOptions { SingleReader = true });
 
@@ -36,20 +38,22 @@ public sealed class InputEventForwarder(ILogger<InputEventForwarder> logger) : I
         };
         inputChannel.onclose += () => queue.Writer.TryComplete();
 
-        _ = ReplayLoopAsync(queue.Reader, page, targetUrl);
+        _ = ReplayLoopAsync(queue.Reader, page, targetUrl, allowKeyboard);
     }
 
     // Single consumer: replays queued events strictly in arrival order until the channel closes.
-    private async Task ReplayLoopAsync(ChannelReader<byte[]> reader, IPage page, Uri targetUrl)
+    private async Task ReplayLoopAsync(ChannelReader<byte[]> reader, IPage page, Uri targetUrl, bool allowKeyboard)
     {
         await foreach (var data in reader.ReadAllAsync())
         {
-            await HandleAsync(page, data, targetUrl);
+            await HandleAsync(page, data, targetUrl, allowKeyboard);
         }
     }
 
     // Deserializes one input event and replays it on the page via the matching Playwright API.
-    private async Task HandleAsync(IPage page, byte[] data, Uri targetUrl)
+    // allowKeyboard false drops keydown/keyup here -- server-authoritative, independent of whether
+    // the client actually sends them.
+    private async Task HandleAsync(IPage page, byte[] data, Uri targetUrl, bool allowKeyboard)
     {
         var receivedAt = Stopwatch.GetTimestamp();
         try
@@ -82,11 +86,14 @@ public sealed class InputEventForwarder(ILogger<InputEventForwarder> logger) : I
                 case "wheel":
                     await page.Mouse.WheelAsync(inputEvent.DeltaX ?? 0, inputEvent.DeltaY ?? 0);
                     break;
-                case "keydown" when inputEvent.Key is not null:
+                case "keydown" when inputEvent.Key is not null && allowKeyboard:
                     await page.Keyboard.DownAsync(inputEvent.Key);
                     break;
-                case "keyup" when inputEvent.Key is not null:
+                case "keyup" when inputEvent.Key is not null && allowKeyboard:
                     await page.Keyboard.UpAsync(inputEvent.Key);
+                    break;
+                case "keydown" or "keyup" when !allowKeyboard:
+                    // VideoNoInput: dropped, not replayed.
                     break;
                 default:
                     logger.LogWarning("Unhandled input event type {Type} for {Url}", inputEvent.Type, targetUrl);

@@ -7,6 +7,7 @@ using Microsoft.AspNetCore.Http.Extensions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using RemoteBrowserIsolation.Server.Data;
+using RemoteBrowserIsolation.Server.Models;
 using RemoteBrowserIsolation.Server.Models.Proxy;
 using RemoteBrowserIsolation.Server.Rest;
 using RemoteBrowserIsolation.Server.Rest.Admin;
@@ -48,6 +49,7 @@ builder.Services.AddSingleton<IHtmlNoInputInjector, HtmlNoInputInjector>();
 builder.Services.AddSingleton<ILeafCertificateMinter, LeafCertificateMinter>();
 
 builder.Services.Configure<ProxyOptions>(builder.Configuration.GetSection("Proxy"));
+builder.Services.Configure<WebRtcOptions>(builder.Configuration.GetSection("WebRtc"));
 
 // The TLS-intercepting forward proxy listener -- a hand-rolled TcpListener, not Kestrel-hosted (see
 // TlsInterceptingProxyServer's class doc comment for why). Registered as a hosted service so it
@@ -101,6 +103,11 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
 builder.Services.AddAuthorization();
 
 var app = builder.Build();
+
+// SIPSorcery logs through its own static LogFactory, not the ASP.NET Core DI logging pipeline --
+// without this, ICE/DTLS/STUN diagnostics (candidate checks, connectivity failures) are silently
+// dropped regardless of the "SIPSorcery" Logging:LogLevel setting.
+SIPSorcery.LogFactory.Set(app.Services.GetRequiredService<ILoggerFactory>());
 
 // Applies any pending EF Core migrations at startup so the SQLite schema is always up to date
 // without a separate manual migration step in deployment.

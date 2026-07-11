@@ -14,6 +14,12 @@ public interface ILeafCertificateMinter
     // (ServerOptionsSelectionCallback), not the older sync ServerCertificateSelectionCallback, so
     // there's no need to block on it.
     Task<X509Certificate2?> GetOrMintAsync(string hostname, CancellationToken cancellationToken = default);
+
+    // Drops every cached leaf cert so the next request for any hostname re-mints against whatever
+    // CA IRootCaStore currently holds. Must be called whenever the active root CA changes (upload
+    // or delete) -- otherwise a hostname minted before the change keeps serving a leaf signed by
+    // the stale CA for up to its full cache lifetime, regardless of how recently the CA changed.
+    void ClearCache();
 }
 
 // Mints short-lived leaf certificates on demand, signed by the admin-uploaded root CA
@@ -75,6 +81,8 @@ public sealed class LeafCertificateMinter(IRootCaStore rootCaStore) : ILeafCerti
             _mintLock.Release();
         }
     }
+
+    public void ClearCache() => _cache.Clear();
 
     private static bool IsNearExpiry(X509Certificate2 cert) => cert.NotAfter - DateTime.Now < RenewalWindow;
 

@@ -2,6 +2,7 @@
 bin/
 obj/
 *.user
+publish/
 
 # Local SQLite dev database (created at runtime from ConnectionStrings:Sqlite; never checked in)
 *.db

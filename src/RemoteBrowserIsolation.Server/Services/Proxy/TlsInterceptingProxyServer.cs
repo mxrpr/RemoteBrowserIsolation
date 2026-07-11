@@ -1,3 +1,4 @@
+using System.IO.Compression;
 using System.Net;
 using System.Net.Security;
 using System.Net.Sockets;
@@ -262,7 +263,16 @@ public sealed class TlsInterceptingProxyServer(
             return originResponse;
         }
 
-        byte[] processed = noInputInjector.Process(originResponse.Body, targetUrl, noInput: true);
+        // OriginForwarder deliberately leaves the body exactly as the origin sent it (see its class
+        // doc comment) -- if the origin compressed it, htmlBytes here is still compressed and must
+        // be inflated before AngleSharp can parse it as HTML, or Process silently mangles it into
+        // garbage (compressed bytes misread as text and re-serialized).
+        string? contentEncoding = originResponse.Headers
+            .FirstOrDefault(h => string.Equals(h.Name, "Content-Encoding", StringComparison.OrdinalIgnoreCase))
+            ?.Value;
+        byte[] decompressedBody = DecompressBody(originResponse.Body, contentEncoding);
+
+        byte[] processed = noInputInjector.Process(decompressedBody, targetUrl, noInput: true);
         // Content-Encoding must be dropped explicitly (unlike Transfer-Encoding, it's an
         // end-to-end header) since the injected body is no longer compressed the way the origin's
         // header claims.
@@ -277,6 +287,31 @@ public sealed class TlsInterceptingProxyServer(
             Headers = headersWithoutEncoding,
             Body = processed,
         };
+    }
+
+    // Inflates a response body per its Content-Encoding so HtmlNoInputInjector always sees plain
+    // bytes -- OriginForwarder never decompresses (see its class doc comment). Unrecognized/absent
+    // encodings pass through unchanged (covers "identity" and the common no-compression case).
+    private static byte[] DecompressBody(byte[] body, string? contentEncoding)
+    {
+        Stream? decoder = contentEncoding?.Trim().ToLowerInvariant() switch
+        {
+            "gzip" => new GZipStream(new MemoryStream(body), CompressionMode.Decompress),
+            "br" => new BrotliStream(new MemoryStream(body), CompressionMode.Decompress),
+            "deflate" => new DeflateStream(new MemoryStream(body), CompressionMode.Decompress),
+            _ => null,
+        };
+        if (decoder is null)
+        {
+            return body;
+        }
+
+        using (decoder)
+        {
+            using var output = new MemoryStream();
+            decoder.CopyTo(output);
+            return output.ToArray();
+        }
     }
 
     // The response shown for VideoAllowInput/VideoNoInput hosts instead of real content: a static
@@ -425,8 +460,16 @@ public sealed class TlsInterceptingProxyServer(
         }
 
         string? address = kestrelServer.Features.Get<IServerAddressesFeature>()?.Addresses.FirstOrDefault();
-        _selfOriginBaseUrl = address ?? "http://localhost:5000";
-        _selfOriginPort = Uri.TryCreate(_selfOriginBaseUrl, UriKind.Absolute, out Uri? parsed) ? parsed.Port : 5000;
+        Uri.TryCreate(address, UriKind.Absolute, out Uri? parsed);
+        _selfOriginPort = parsed?.Port ?? 5000;
+
+        // Kestrel reports its literal bind address (e.g. "0.0.0.0" under ASPNETCORE_URLS=http://
+        // 0.0.0.0:5000 in Docker) -- that's a wildcard bind, not a dialable/linkable host. Baking it
+        // into a client-facing URL (the video interstitial's link, below) sends the browser to a
+        // host with no SitePolicy row and not in SelfHosts, which then 502s at the proxy. Substitute
+        // "localhost", which is always in SelfHosts and always resolves to this same machine.
+        string host = parsed?.Host is null or "0.0.0.0" or "[::]" or "::" ? "localhost" : parsed.Host;
+        _selfOriginBaseUrl = $"http://{host}:{_selfOriginPort}";
         return _selfOriginPort.Value;
     }
 

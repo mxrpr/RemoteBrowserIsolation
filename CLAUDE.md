@@ -4,7 +4,30 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A remote browser isolation server: given a URL, the server fetches the page over HTTP/HTTPS and streams the raw bytes back to a browser over a WebRTC data channel (not video/screenshot streaming — a raw byte relay). See `plans/1_iteration_framework.md` (requirements) and `plans/1_iteration_plan.md` (design decisions, step-by-step build plan, acceptance criteria) for the full iteration-1 scope.
+A remote browser isolation server. Current (post iteration-9) shape — **do not describe this as
+"fetch + relay raw bytes over a data channel"; that was iteration-1 only and is long superseded**:
+
+- **Normal browsing = TLS-intercepting forward proxy (`TlsInterceptingProxyServer`).** The client
+  points its OS/browser proxy setting at this server. The server intercepts `CONNECT`, terminates
+  TLS with a leaf cert minted off an admin-uploaded root CA, and relays HTTP/HTTPS traffic for any
+  host policy-tagged `HtmlAllowInput`/`HtmlNoInput`. This is the default/primary path — most sites
+  are expected to be handled here, normal speed, real browser rendering client-side.
+- **Video mode = escalation for risky/untrusted sites.** A host policy-tagged
+  `VideoAllowInput`/`VideoNoInput` gets none of its real content relayed — the proxy instead serves
+  a static interstitial page linking to `index.html?url=...`, which opens a WebRTC session
+  (`POST /api/session/offer`) to a server-side headless Chromium (Playwright) render, streamed back
+  as a VP8 video track. No page code (HTML/JS/CSS) ever reaches the client in this mode — only
+  encoded video + forwarded input. This is the "actually isolate it" path for sites the policy
+  doesn't trust to touch the user's real browser.
+- **Policy is deny-by-default, per-hostname** (`PolicyEngine` / `SitePolicy` rows, admin-managed via
+  `/admin/`): an unmatched host is blocked outright; a matched host gets one of the four `ViewMode`
+  values above. See `README.md`'s mode table for the full enforcement-strength breakdown (only
+  `VideoNoInput` is actually server-enforced against a malicious client — `HtmlNoInput` is a
+  client-side CSS nudge, not a security boundary).
+
+`plans/1_iteration_framework.md`/`plans/1_iteration_plan.md` cover only the original iteration-1
+raw-byte-relay design — historical, not current behavior. For current behavior see
+`plans/9_TLS_proxy.md` (proxy/policy dispatch) and this file's Architecture section below.
 
 ## Commands
 

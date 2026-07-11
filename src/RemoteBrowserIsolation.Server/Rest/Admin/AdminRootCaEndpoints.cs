@@ -48,7 +48,7 @@ public static class AdminRootCaEndpoints
             return Results.File(publicDer, "application/x-x509-ca-cert", "rbi-root-ca.cer");
         });
 
-        group.MapPost("", async (HttpRequest request, AppDbContext db, IRootCaStore store) =>
+        group.MapPost("", async (HttpRequest request, AppDbContext db, IRootCaStore store, ILeafCertificateMinter minter) =>
         {
             if (!request.HasFormContentType)
             {
@@ -113,14 +113,20 @@ public static class AdminRootCaEndpoints
                 await db.SaveChangesAsync();
 
                 store.Invalidate();
+                // Every already-cached leaf cert was signed by whatever CA was active when it was
+                // minted -- without this, a hostname visited before this upload keeps serving that
+                // stale-CA leaf (SEC_ERROR_BAD_SIGNATURE once the client trusts only the new CA)
+                // until its own cache TTL expires, independent of RootCaStore.Invalidate() above.
+                minter.ClearCache();
                 return Results.Ok(ToResponse(row));
             }
         });
 
-        group.MapDelete("", async (AppDbContext db, IRootCaStore store) =>
+        group.MapDelete("", async (AppDbContext db, IRootCaStore store, ILeafCertificateMinter minter) =>
         {
             await db.RootCertificateAuthorities.ExecuteDeleteAsync();
             store.Invalidate();
+            minter.ClearCache();
             return Results.NoContent();
         });
     }
