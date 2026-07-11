@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+For a full architecture walkthrough (HTML vs video mode, the WebRTC pipeline, ICE/mDNS/SCTP/
+DTLS/SIPSorcery internals, config reference, Docker deployment, debugging playbook), see
+`docs/developer_doc.md`.
+
 ## What this is
 
 A remote browser isolation server. Current (post iteration-9) shape — **do not describe this as
@@ -48,6 +52,17 @@ cd src/RemoteBrowserIsolation.Server && dotnet build
 Manual verification (no automated test suite yet):
 - Health check: `curl http://localhost:<port>/health`
 - Full WebRTC flow: open `http://localhost:<port>/index.html` in a real browser (or headless Chromium via Playwright — this repo has been verified working that way), enter a URL, click Fetch.
+
+## Docker
+
+`./scripts/run_docker.sh` builds and runs the user's own long-lived container, named `rbi`
+(`docker run --name rbi ...`), with the DB bind-mounted from `./data` so it survives rebuilds.
+
+**When testing/debugging the Docker image yourself (Claude), always build and run under a
+different name — `rbi-testing` — never `rbi`.** Reusing `rbi` collides with the user's own
+container ("name already in use") and forces a full rebuild (Chromium/FFmpeg redownload) the next
+time they run `run_docker.sh`. Use different host ports too if `rbi`'s (5000/8080/40000-40009) are
+already bound by their running container.
 
 ## Architecture
 
