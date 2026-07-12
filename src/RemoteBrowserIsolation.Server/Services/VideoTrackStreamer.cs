@@ -36,13 +36,6 @@ public sealed class VideoTrackStreamer(ILogger<VideoTrackStreamer> logger) : IVi
     // RTP video clock is fixed at 90kHz by RFC; SendVideo takes frame duration in these units.
     private const int RtpVideoClockRate = 90_000;
 
-    // Tells Chromium to only emit every Nth repaint as a screencast frame, skipping work at the
-    // source (Chromium's own JPEG encode) instead of after the fact -- cheaper than receiving
-    // and discarding frames ourselves. 2 halves frame rate under constant repaint; the
-    // mailbox's latest-wins/DropOldest behavior already conflates bursts, so this mainly matters
-    // for steady animation, not idle pages (CDP only fires screencastFrame on repaint anyway).
-    private const int EveryNthFrame = 2;
-
     // Opens a CDP screencast on the session's page and pumps frames through decode->encode->RTP.
     // Frames flow through a latest-wins mailbox (capacity 1, DropOldest) exactly like iteration 2:
     // the CDP handler acks immediately and only stores the newest JPEG, while a single consumer
@@ -107,7 +100,6 @@ public sealed class VideoTrackStreamer(ILogger<VideoTrackStreamer> logger) : IVi
             ["quality"] = JpegQuality,
             ["maxWidth"] = 4096,
             ["maxHeight"] = 4096,
-            ["everyNthFrame"] = EveryNthFrame,
         });
     }
 
