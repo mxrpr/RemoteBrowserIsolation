@@ -435,6 +435,12 @@ other frame). Notably, per-frame transcode ms *also* dropped, not just frame cou
 less CPU contention with Chromium's own JPEG-encode work competing for the same cores/cache,
 rather than a change in per-frame algorithmic cost.
 
+**Tried `EveryNthFrame = 3` (2026-07-12), reverted.** Per-frame ms plateaued at the nth=2 level
+(~16.4-17.5ms either way, no further drop) -- the CPU-contention relief that made nth=2 pay off
+had already saturated. All that changed going 2->3 was fewer frames delivered per second
+(~82 -> ~55 per 20s window, i.e. ~4.1fps -> ~2.75fps on this test box), a real user-visible
+smoothness cost with zero additional speed benefit. Kept at `EveryNthFrame = 2`.
+
 ## Open question -- "smarter protocol" (partial/dirty-rect updates)
 
 User asked whether a more advanced protocol (refresh only the changed screen region) would beat
