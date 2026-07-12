@@ -48,7 +48,12 @@ public sealed class HeadlessBrowserSessionManager : IHeadlessBrowserSessionManag
             ViewportSize = new ViewportSize { Width = viewportWidth, Height = viewportHeight },
         });
         var page = await context.NewPageAsync();
-        await page.GotoAsync(targetUrl.ToString());
+        // DOMContentLoaded, not the default "load": video mode targets untrusted/risky sites, which
+        // are exactly the kind likely to have slow subresources (ads, trackers, redirects). Waiting
+        // for full "load" blocks the first screencast frame on all of that; CDP screencast (started
+        // right after this returns) captures whatever's painted so far and VP8's delta frames catch
+        // the rest of the page up as it keeps loading.
+        await page.GotoAsync(targetUrl.ToString(), new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
         return new HeadlessSession(context, page);
     }
 

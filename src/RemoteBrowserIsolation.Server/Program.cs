@@ -48,6 +48,29 @@ builder.Services.AddSingleton<IHtmlNoInputInjector, HtmlNoInputInjector>();
 // reasoning as RootCaStore.
 builder.Services.AddSingleton<ILeafCertificateMinter, LeafCertificateMinter>();
 
+// Singleton -- hardware probe result and configured mode must be shared/cached across every video
+// session, same reasoning as RootCaStore.
+builder.Services.AddSingleton<IGpuEncoderProbe, GpuEncoderProbe>();
+builder.Services.AddSingleton<IVideoEncoderSettingsStore, VideoEncoderSettingsStore>();
+
+// The admin-configured log level. logLevelState is constructed here (not resolved through DI) and
+// registered as the same instance so LogLevelSettingsStore can update it later -- the filter below
+// needs a live object to close over before the service provider exists.
+var logLevelState = new LogLevelState();
+builder.Services.AddSingleton(logLevelState);
+builder.Services.AddSingleton<ILogLevelSettingsStore, LogLevelSettingsStore>();
+
+// Fully replaces the appsettings.json Logging:LogLevel config (all categories, including
+// Microsoft.AspNetCore and SIPSorcery) with a single admin-controlled level, rather than adding a
+// floor on top of it -- clearing the config-derived rules first is what makes this an override
+// instead of "whichever is stricter". The closure reads logLevelState.CurrentLevel on every log
+// call, so a change from the admin UI applies immediately with no restart.
+builder.Services.Configure<LoggerFilterOptions>(options =>
+{
+    options.Rules.Clear();
+    options.Rules.Add(new LoggerFilterRule(null, null, null, (_, _, level) => level >= logLevelState.CurrentLevel));
+});
+
 builder.Services.Configure<ProxyOptions>(builder.Configuration.GetSection("Proxy"));
 builder.Services.Configure<WebRtcOptions>(builder.Configuration.GetSection("WebRtc"));
 
@@ -117,6 +140,10 @@ using (IServiceScope migrationScope = app.Services.CreateScope())
     db.Database.Migrate();
 }
 
+// Populates logLevelState from the DB before the first request/log line, so the admin-configured
+// level (not just LogLevelState's Information default) is in effect from startup.
+await app.Services.GetRequiredService<ILogLevelSettingsStore>().GetLevelAsync();
+
 // Bind the FFmpeg native libraries (VP8 encoder for the video track) before any session starts.
 // The lib directory is machine-specific config ("FFmpeg:LibPath"); fail fast with an actionable
 // message rather than letting the first session die with an obscure DllNotFoundException.
@@ -168,6 +195,8 @@ app.MapAdminAuthEndpoints();
 app.MapAdminSiteEndpoints();
 app.MapAdminLogEndpoints();
 app.MapAdminRootCaEndpoints();
+app.MapAdminVideoEncoderSettingsEndpoints();
+app.MapAdminLogLevelSettingsEndpoints();
 
 // Public browse surface: policy-resolution hint plus the video-mode WebRTC session start. HTML
 // mode no longer has an app-level endpoint -- it's served directly by the TLS-intercepting proxy

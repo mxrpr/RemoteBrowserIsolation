@@ -188,6 +188,7 @@
           <button class="nav-item active" data-section="policiesSection">Policies</button>
           <button class="nav-item" data-section="logsSection">Logs</button>
           <button class="nav-item" data-section="rootCaSection">Root CA</button>
+          <button class="nav-item" data-section="settingsSection">Settings</button>
         </nav>
 
         <div class="content">
@@ -240,6 +241,35 @@
             </form>
             <div id="rootCaError" class="error-row"></div>
           </section>
+
+          <!-- Video encoder mode for the server-side render pipeline (VideoTrackStreamer). GPU
+               hardware encode isn't implemented yet (see plans/11_video_pipeline_speedup.md Step
+               4) -- this only controls whether that gap is silently ignored (Auto, falls back to
+               CPU) or surfaced loudly to the next video-mode session (Gpu, fails the session
+               instead of a silent no-op). -->
+          <section class="card hidden" id="settingsSection">
+            <h2>Video encoder</h2>
+            <div id="videoEncoderStatus">Loading...</div>
+            <select id="videoEncoderMode" style="margin-top: 14px;">
+              <option value="Auto">Auto</option>
+              <option value="Cpu">CPU</option>
+              <option value="Gpu">GPU</option>
+            </select>
+            <div id="videoEncoderError" class="error-row"></div>
+
+            <h2 style="margin-top: 24px;">Log level</h2>
+            <div id="logLevelStatus">Loading...</div>
+            <select id="logLevel" style="margin-top: 14px;">
+              <option value="Trace">Trace</option>
+              <option value="Debug">Debug</option>
+              <option value="Information">Information</option>
+              <option value="Warning">Warning</option>
+              <option value="Error">Error</option>
+              <option value="Critical">Critical</option>
+              <option value="None">None</option>
+            </select>
+            <div id="logLevelError" class="error-row"></div>
+          </section>
         </div>
       </div>
     </div>
@@ -283,6 +313,8 @@
       loadSites();
       loadLogs();
       loadRootCa();
+      loadVideoEncoderSetting();
+      loadLogLevelSetting();
     }
 
     // Tracks the last-known bootstrap state so the login handler knows whether to demand a
@@ -307,6 +339,16 @@
       } catch (e) {
         loginHint.textContent = 'Could not reach server: ' + e.message;
       }
+    }
+
+    // Enter in any login field submits, same as clicking loginBtn -- these inputs aren't inside a
+    // <form>, so Enter wouldn't otherwise trigger anything.
+    for (const el of [document.getElementById('email'), document.getElementById('password'), passwordConfirm]) {
+      el.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          document.getElementById('loginBtn').click();
+        }
+      });
     }
 
     document.getElementById('loginBtn').onclick = async () => {
@@ -579,6 +621,82 @@
         loadRootCa();
       } catch (e) {
         rootCaError.textContent = 'Upload request failed: ' + e.message;
+      }
+    };
+
+    // Loads the current video encoder mode and detected-GPU status, and renders the status line
+    // above the mode <select>. The select's current value is set to the stored mode but its
+    // onchange handler (wired once below, outside this function) does the actual saving.
+    async function loadVideoEncoderSetting() {
+      const status = document.getElementById('videoEncoderStatus');
+      status.textContent = 'Loading...';
+      try {
+        const resp = await authedFetch('/api/admin/settings/video-encoder');
+        const setting = await resp.json();
+        document.getElementById('videoEncoderMode').value = setting.mode;
+        renderVideoEncoderStatus(setting);
+      } catch (e) {
+        status.textContent = 'Failed to load: ' + e.message;
+      }
+    }
+
+    // Renders the detected-hardware line so the admin sees actual reality, not just the
+    // configured wish -- same reasoning as the Root CA section showing the real cert metadata.
+    function renderVideoEncoderStatus(setting) {
+      const status = document.getElementById('videoEncoderStatus');
+      status.textContent = 'GPU: ' + (setting.detectedGpu.available
+        ? setting.detectedGpu.description
+        : 'not detected (' + setting.detectedGpu.description + ')');
+    }
+
+    document.getElementById('videoEncoderMode').onchange = async (e) => {
+      const videoEncoderError = document.getElementById('videoEncoderError');
+      videoEncoderError.textContent = '';
+      try {
+        const resp = await authedFetch('/api/admin/settings/video-encoder', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mode: e.target.value }),
+        });
+        const setting = await resp.json();
+        renderVideoEncoderStatus(setting);
+      } catch (err) {
+        videoEncoderError.textContent = 'Failed to save: ' + err.message;
+        loadVideoEncoderSetting();
+      }
+    };
+
+    // Loads the current server-wide log level and sets the <select>'s value. This level fully
+    // replaces the appsettings.json Logging:LogLevel config for every category (not just a floor
+    // on top of it) -- see AdminLogLevelSettingsEndpoints.
+    async function loadLogLevelSetting() {
+      const status = document.getElementById('logLevelStatus');
+      status.textContent = 'Loading...';
+      try {
+        const resp = await authedFetch('/api/admin/settings/log-level');
+        const setting = await resp.json();
+        document.getElementById('logLevel').value = setting.level;
+        status.textContent = 'Current level: ' + setting.level;
+      } catch (e) {
+        status.textContent = 'Failed to load: ' + e.message;
+      }
+    }
+
+    document.getElementById('logLevel').onchange = async (e) => {
+      const logLevelError = document.getElementById('logLevelError');
+      const logLevelStatus = document.getElementById('logLevelStatus');
+      logLevelError.textContent = '';
+      try {
+        const resp = await authedFetch('/api/admin/settings/log-level', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ level: e.target.value }),
+        });
+        const setting = await resp.json();
+        logLevelStatus.textContent = 'Current level: ' + setting.level;
+      } catch (err) {
+        logLevelError.textContent = 'Failed to save: ' + err.message;
+        loadLogLevelSetting();
       }
     };
 

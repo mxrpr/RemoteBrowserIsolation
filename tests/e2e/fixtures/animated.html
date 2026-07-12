@@ -1,0 +1,24 @@
+<!doctype html>
+<html><body style="margin:0;overflow:hidden;background:#111">
+<canvas id="c" width="1280" height="720"></canvas>
+<script>
+// Continuously repaints (moving box + changing colors + live clock text) so the CDP
+// screencast keeps producing fresh, non-identical frames for the whole measurement window --
+// needed so the transcode loop actually has real per-frame work to time, instead of libvpx's
+// static-thresh skip path making frames free.
+var ctx = document.getElementById('c').getContext('2d');
+var x = 0;
+function frame() {
+  x = (x + 6) % 1280;
+  var hue = (Date.now() / 10) % 360;
+  ctx.fillStyle = 'hsl(' + hue + ',80%,50%)';
+  ctx.fillRect(0, 0, 1280, 720);
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(x, 300, 120, 120);
+  ctx.font = '48px sans-serif';
+  ctx.fillText(new Date().toISOString(), 40, 100);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body></html>

@@ -1,7 +1,7 @@
 using System.Diagnostics;
 using System.Threading.Channels;
-using FFmpeg.AutoGen;
 using Microsoft.Playwright;
+using RemoteBrowserIsolation.Server.Models;
 using SIPSorcery.Net;
 using SIPSorceryMedia.Abstractions;
 using SIPSorceryMedia.FFmpeg;
@@ -14,12 +14,16 @@ public interface IVideoTrackStreamer
 }
 
 // Streams the server-side rendered page to the client as a real VP8 video track over RTP.
-// Pipeline per frame: CDP screencast JPEG -> FFmpeg MJPEG decode (raw RGB) -> FFmpeg VP8 encode ->
-// RTCPeerConnection.SendVideo. This replaces iteration 2's JPEG-over-datachannel transport: RTP has
+// Pipeline per frame: CDP screencast JPEG -> MjpegToI420Decoder (MJPEG decode straight to I420,
+// no RGB round-trip) -> FFmpeg VP8 encode -> RTCPeerConnection.SendVideo. This replaces iteration
+// 2's JPEG-over-datachannel transport: RTP has
 // no SIPSorcery-imposed throughput ceiling (the data channel's SCTP sender drains at a fixed
 // ~75KB/s), and VP8 delta frames make unchanged screen regions nearly free, so quality and
 // resolution can both go up while latency goes down.
-public sealed class VideoTrackStreamer(ILogger<VideoTrackStreamer> logger) : IVideoTrackStreamer
+public sealed class VideoTrackStreamer(
+    ILogger<VideoTrackStreamer> logger,
+    IVideoEncoderSettingsStore videoEncoderSettingsStore,
+    IGpuEncoderProbe gpuEncoderProbe) : IVideoTrackStreamer
 {
     private const int JpegQuality = 80;
 
@@ -43,6 +47,8 @@ public sealed class VideoTrackStreamer(ILogger<VideoTrackStreamer> logger) : IVi
     // stateful VP8 encoder strictly single-threaded.
     public async Task StartAsync(RTCPeerConnection pc, HeadlessSession session, Uri targetUrl, CancellationToken cancellationToken = default)
     {
+        await CheckVideoEncoderModeAsync(targetUrl, cancellationToken);
+
         var cdp = await session.Context.NewCDPSessionAsync(session.Page);
 
         var mailbox = Channel.CreateBounded<byte[]>(new BoundedChannelOptions(1)
@@ -103,25 +109,74 @@ public sealed class VideoTrackStreamer(ILogger<VideoTrackStreamer> logger) : IVi
         });
     }
 
+    // Checks the admin-configured video encoder mode before any capture/encode work starts.
+    // Cpu (the only mode with a real encode path today) is a no-op. Auto probes for hardware and
+    // logs what it found, but always proceeds on CPU regardless -- there is no GPU encode
+    // pipeline implemented yet (see plans/11_video_pipeline_speedup.md Step 4). Gpu always throws
+    // -- forcing hardware encode must fail loudly rather than silently falling back to CPU, so a
+    // misconfigured/unimplemented GPU path is visible to the admin (surfaces as the existing
+    // "Failed to start rendering session" error path in WebRtcSessionManager) instead of quietly
+    // costing nothing.
+    private async Task CheckVideoEncoderModeAsync(Uri targetUrl, CancellationToken cancellationToken)
+    {
+        VideoEncoderMode mode = await videoEncoderSettingsStore.GetModeAsync(cancellationToken);
+
+        switch (mode)
+        {
+            case VideoEncoderMode.Cpu:
+                return;
+
+            case VideoEncoderMode.Auto:
+                GpuProbeResult autoProbe = await gpuEncoderProbe.ProbeAsync();
+                logger.LogInformation(
+                    "Video encoder mode Auto for {Url}: {Description} -- no GPU encode pipeline implemented yet, using CPU",
+                    targetUrl, autoProbe.Description);
+                return;
+
+            case VideoEncoderMode.Gpu:
+                GpuProbeResult gpuProbe = await gpuEncoderProbe.ProbeAsync();
+                throw new InvalidOperationException(gpuProbe.Available
+                    ? $"Video encoder mode is set to GPU and hardware was detected ({gpuProbe.Description}), but the GPU encode pipeline is not implemented yet. Switch to Auto or CPU."
+                    : $"Video encoder mode is set to GPU but no hardware encoder was detected ({gpuProbe.Description}).");
+
+            default:
+                throw new ArgumentOutOfRangeException(nameof(mode), mode, "Unknown video encoder mode.");
+        }
+    }
+
     // Single consumer: decodes the newest JPEG, VP8-encodes it, and pushes it onto the RTP track,
     // until the mailbox closes on disconnect. Owns the FFmpeg decoder/encoder pair for the session —
     // the VP8 encoder is stateful (delta frames reference prior frames), so it must live exactly as
     // long as the stream and never be shared across sessions.
     private async Task TranscodeLoopAsync(RTCPeerConnection pc, ChannelReader<byte[]> reader, Uri targetUrl)
     {
-        using var decoder = new FFmpegVideoEncoder();
+        using var decoder = new MjpegToI420Decoder();
         // libvpx realtime tuning: "deadline=realtime" caps how long the encoder may spend per
         // frame, "cpu-used=8" trades a little compression efficiency for speed, "lag-in-frames=0"
         // forbids lookahead buffering (which would add whole frames of latency). Measured ~35%
         // faster per frame than the default "good" deadline at 720p.
+        // "static-thresh=100" lets the encoder skip macroblocks whose residual is below the
+        // threshold -- screencast content is mostly static between frames, so this both speeds
+        // up encoding and saves bits. (row-mt is VP9-only, does not apply to VP8. A
+        // "token_partitions" option was tried here to enable within-frame thread parallelism but
+        // this FFmpeg build's libvpx wrapper doesn't expose it -- av_opt_set logs "Option not
+        // found" and it's silently ignored. Not needed anyway: FFmpeg's libvpx encoder derives
+        // the token-partition count automatically from thread_count below.)
         var realtimeOptions = new Dictionary<string, string>
         {
             ["deadline"] = "realtime",
             ["cpu-used"] = "8",
             ["lag-in-frames"] = "0",
+            ["static-thresh"] = "100",
         };
         using var encoder = new FFmpegVideoEncoder(realtimeOptions);
         encoder.SetBitrate(TargetBitrate, null, MinBitrate, MaxBitrate);
+        // libvpx multithreading: thread_count is applied to the codec context when the encoder
+        // is initialised on the first frame, and also drives libvpx's automatic token-partition
+        // count (so multiple threads can actually work on one frame, not just across frames).
+        // Without this the encode runs on a single core and is the dominant per-frame cost
+        // (~15-20ms at 720p).
+        encoder.SetThreadCount(Environment.ProcessorCount);
 
         var lastFrameAt = Stopwatch.GetTimestamp();
         var lastKeyFrameAt = Stopwatch.GetTimestamp();
@@ -133,8 +188,7 @@ public sealed class VideoTrackStreamer(ILogger<VideoTrackStreamer> logger) : IVi
             {
                 var t0 = Stopwatch.GetTimestamp();
 
-                var rawFrames = decoder.DecodeFaster(AVCodecID.AV_CODEC_ID_MJPEG, jpegBytes, out _, out _);
-                if (rawFrames is not { Count: > 0 })
+                if (!decoder.TryDecode(jpegBytes, out var i420Ptr, out var frameWidth, out var frameHeight))
                 {
                     logger.LogWarning("JPEG decode produced no frame for {Url}", targetUrl);
                     continue;
@@ -146,7 +200,15 @@ public sealed class VideoTrackStreamer(ILogger<VideoTrackStreamer> logger) : IVi
                     lastKeyFrameAt = Stopwatch.GetTimestamp();
                 }
 
-                var encoded = encoder.EncodeVideoFaster(rawFrames[0], VideoCodecsEnum.VP8);
+                var rawImage = new RawImage
+                {
+                    Width = frameWidth,
+                    Height = frameHeight,
+                    Stride = frameWidth,
+                    Sample = i420Ptr,
+                    PixelFormat = VideoPixelFormatsEnum.I420,
+                };
+                var encoded = encoder.EncodeVideoFaster(rawImage, VideoCodecsEnum.VP8);
                 if (encoded is not { Length: > 0 })
                 {
                     continue;
