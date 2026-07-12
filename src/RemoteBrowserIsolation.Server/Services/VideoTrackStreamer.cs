@@ -1,6 +1,5 @@
 using System.Diagnostics;
 using System.Threading.Channels;
-using FFmpeg.AutoGen;
 using Microsoft.Playwright;
 using SIPSorcery.Net;
 using SIPSorceryMedia.Abstractions;
@@ -14,8 +13,9 @@ public interface IVideoTrackStreamer
 }
 
 // Streams the server-side rendered page to the client as a real VP8 video track over RTP.
-// Pipeline per frame: CDP screencast JPEG -> FFmpeg MJPEG decode (raw RGB) -> FFmpeg VP8 encode ->
-// RTCPeerConnection.SendVideo. This replaces iteration 2's JPEG-over-datachannel transport: RTP has
+// Pipeline per frame: CDP screencast JPEG -> MjpegToI420Decoder (MJPEG decode straight to I420,
+// no RGB round-trip) -> FFmpeg VP8 encode -> RTCPeerConnection.SendVideo. This replaces iteration
+// 2's JPEG-over-datachannel transport: RTP has
 // no SIPSorcery-imposed throughput ceiling (the data channel's SCTP sender drains at a fixed
 // ~75KB/s), and VP8 delta frames make unchanged screen regions nearly free, so quality and
 // resolution can both go up while latency goes down.
@@ -109,19 +109,30 @@ public sealed class VideoTrackStreamer(ILogger<VideoTrackStreamer> logger) : IVi
     // long as the stream and never be shared across sessions.
     private async Task TranscodeLoopAsync(RTCPeerConnection pc, ChannelReader<byte[]> reader, Uri targetUrl)
     {
-        using var decoder = new FFmpegVideoEncoder();
+        using var decoder = new MjpegToI420Decoder();
         // libvpx realtime tuning: "deadline=realtime" caps how long the encoder may spend per
         // frame, "cpu-used=8" trades a little compression efficiency for speed, "lag-in-frames=0"
         // forbids lookahead buffering (which would add whole frames of latency). Measured ~35%
         // faster per frame than the default "good" deadline at 720p.
+        // "static-thresh=100" lets the encoder skip macroblocks whose residual is below the
+        // threshold -- screencast content is mostly static between frames, so this both speeds
+        // up encoding and saves bits. "token_partitions=3" splits the bitstream into 8
+        // independent partitions so the encoder threads (SetThreadCount below) can parallelise
+        // within one frame. (row-mt is VP9-only, does not apply to VP8.)
         var realtimeOptions = new Dictionary<string, string>
         {
             ["deadline"] = "realtime",
             ["cpu-used"] = "8",
             ["lag-in-frames"] = "0",
+            ["static-thresh"] = "100",
+            ["token_partitions"] = "3",
         };
         using var encoder = new FFmpegVideoEncoder(realtimeOptions);
         encoder.SetBitrate(TargetBitrate, null, MinBitrate, MaxBitrate);
+        // libvpx multithreading: thread_count is applied to the codec context when the encoder
+        // is initialised on the first frame. Without this the encode runs on a single core and
+        // is the dominant per-frame cost (~15-20ms at 720p).
+        encoder.SetThreadCount(Environment.ProcessorCount);
 
         var lastFrameAt = Stopwatch.GetTimestamp();
         var lastKeyFrameAt = Stopwatch.GetTimestamp();
@@ -133,8 +144,7 @@ public sealed class VideoTrackStreamer(ILogger<VideoTrackStreamer> logger) : IVi
             {
                 var t0 = Stopwatch.GetTimestamp();
 
-                var rawFrames = decoder.DecodeFaster(AVCodecID.AV_CODEC_ID_MJPEG, jpegBytes, out _, out _);
-                if (rawFrames is not { Count: > 0 })
+                if (!decoder.TryDecode(jpegBytes, out var i420Ptr, out var frameWidth, out var frameHeight))
                 {
                     logger.LogWarning("JPEG decode produced no frame for {Url}", targetUrl);
                     continue;
@@ -146,7 +156,15 @@ public sealed class VideoTrackStreamer(ILogger<VideoTrackStreamer> logger) : IVi
                     lastKeyFrameAt = Stopwatch.GetTimestamp();
                 }
 
-                var encoded = encoder.EncodeVideoFaster(rawFrames[0], VideoCodecsEnum.VP8);
+                var rawImage = new RawImage
+                {
+                    Width = frameWidth,
+                    Height = frameHeight,
+                    Stride = frameWidth,
+                    Sample = i420Ptr,
+                    PixelFormat = VideoPixelFormatsEnum.I420,
+                };
+                var encoded = encoder.EncodeVideoFaster(rawImage, VideoCodecsEnum.VP8);
                 if (encoded is not { Length: > 0 })
                 {
                     continue;
