@@ -5,8 +5,12 @@ FROM mcr.microsoft.com/dotnet/aspnet:9.0-noble
 # curl/xz-utils: fetch + extract the FFmpeg tarball below.
 # wget/gnupg/apt-transport-https: add the Microsoft package repo so `powershell` (pwsh) is
 #   installable -- Playwright's .NET port only ships a playwright.ps1 installer, no shell script.
+# libva2/libva-drm2: FFmpeg's VAAPI hwdevice probe (GpuEncoderProbe) dlopens libva-drm.so.2
+#   through an implib-gen lazy-load stub; when the lib is absent that stub hits a hard assert()
+#   and aborts the whole process (SIGABRT, not a catchable .NET exception) instead of failing the
+#   probe gracefully. Installing the real lib makes the probe resolve/fail normally instead.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        curl xz-utils wget gnupg apt-transport-https ca-certificates \
+        curl xz-utils wget gnupg apt-transport-https ca-certificates libva2 libva-drm2 \
     && wget -q https://packages.microsoft.com/config/ubuntu/24.04/packages-microsoft-prod.deb -O /tmp/packages-microsoft-prod.deb \
     && dpkg -i /tmp/packages-microsoft-prod.deb \
     && rm /tmp/packages-microsoft-prod.deb \

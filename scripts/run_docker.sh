@@ -15,6 +15,12 @@
 # the browser's own requests to the admin console / video viewer would get policy-checked and
 # TLS-intercepted like any other site once the proxy is set globally, instead of bypassing straight
 # to Kestrel (see TlsInterceptingProxyServer.BlindTunnelToSelfOriginAsync).
+#
+# --network host: skips Docker's per-packet NAT/userland-proxy path for the WebRTC UDP media
+# range -- real cost for a media-heavy workload. Linux-only: Docker Desktop (Mac/Windows) doesn't
+# support host networking, so those OSes fall back to the old -p port-mapping form below.
+# --shm-size=1g: headless Chromium's default 64MB Docker /dev/shm is too small and forces
+# disk-backed shared memory (slower, sometimes crashes on heavy pages).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -25,13 +31,21 @@ mkdir -p "$ROOT/data"
 
 RUN_ARGS=(
     --rm -it
-    -p 5000:5000
-    -p 8080:8080
-    -p 40000-40009:40000-40009/udp
+    --shm-size=1g
     -v "$ROOT/data:/app/data"
     -e "WebRtc__AdvertisedIp=${RBI_ADVERTISED_IP:-127.0.0.1}"
     --name rbi
 )
+
+if [[ "$(uname -s)" == "Linux" ]]; then
+    RUN_ARGS+=(--network host)
+else
+    RUN_ARGS+=(
+        -p 5000:5000
+        -p 8080:8080
+        -p 40000-40009:40000-40009/udp
+    )
+fi
 
 if [[ -n "${RBI_SELF_HOST:-}" ]]; then
     RUN_ARGS+=(-e "Proxy__SelfHosts__2=${RBI_SELF_HOST}")
