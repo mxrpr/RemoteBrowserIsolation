@@ -400,6 +400,61 @@ dramatic win. Whether that's "sufficient" is a product call, not a technical one
 back to the user rather than deciding unilaterally whether to proceed to Step 4 (GPU hardware
 encode).
 
+## Step 5 -- everyNthFrame (2026-07-12, done)
+
+User asked about faster headless browsers (Firefox/WebKit) -- ruled out: CDP screencast
+(`Page.startScreencast`/`Page.screencastFrame`) is Chromium/CDP-specific, Playwright doesn't
+expose an equivalent for Firefox/WebKit, so switching engines would lose the entire frame
+capture mechanism, not just be a speed tweak.
+
+User then brought a set of CDP-tuning suggestions found online. Checked each against the actual
+code:
+- "Ack immediately" -- already done (`VideoTrackStreamer.cs`'s screencastFrame handler writes to
+  the mailbox synchronously and acks right after, not gated on the transcode loop).
+- "Lower maxWidth/maxHeight" -- doesn't apply; those are just an upper bound (4096) already above
+  the real cap (viewport, max 1280x720), so there's no waste there to cut.
+- "Lower JPEG quality" -- off the table per earlier constraint (quality 80 must stay).
+- **`everyNthFrame`** -- real, unused knob. Implemented: `EveryNthFrame = 2` passed to
+  `Page.startScreencast`, skipping every other repaint at the source (Chromium's own JPEG
+  encode), instead of us receiving and discarding frames after the fact.
+- `puppeteer-stream` (Node/Puppeteer library using Chromium's native tabCapture/MediaStream APIs
+  instead of CDP JPEG screencast) -- not usable from this C#/Playwright/SIPSorcery stack, no
+  .NET equivalent. Same underlying idea as bypassing CDP screencast entirely (see "smarter
+  protocol" discussion below) -- confirms that's the real lever, just not available as a ready
+  library here.
+
+**Measured (3 runs each, 720p, vs master baseline):**
+
+| Page | Baseline median | Steps 1-3 only | + everyNthFrame=2 |
+|------|------------------|----------------|---------------------|
+| Realistic mostly-static | ~23.2ms | ~19.5ms (16%) | ~16.5ms (**~29%**) |
+| Full-motion animated | ~23.0ms | ~21.3ms (~7%) | ~17.2ms (**~25%**) |
+
+Frame count also dropped (~115 -> ~82 frames per 20s window, as expected from skipping every
+other frame). Notably, per-frame transcode ms *also* dropped, not just frame count -- likely
+less CPU contention with Chromium's own JPEG-encode work competing for the same cores/cache,
+rather than a change in per-frame algorithmic cost.
+
+## Open question -- "smarter protocol" (partial/dirty-rect updates)
+
+User asked whether a more advanced protocol (refresh only the changed screen region) would beat
+the current full-frame JPEG approach. Analysis, not yet implemented:
+
+- VP8 itself already does this at the *encode* level (inter-frame delta + `static-thresh`
+  macroblock skip from Step 2) -- the bitstream is already proportional to how much changed.
+- The real constraint is upstream: `Page.startScreencast` is Chromium's only public CDP API for
+  this and it is full-frame-JPEG-only -- no dirty-rect/partial-region parameter exists in it.
+  Chromium therefore still full-frame JPEG-encodes every repaint, and we still full-frame
+  JPEG-decode every frame, regardless of how much of the page actually changed.
+- A genuine "send only the changed region" architecture would mean bypassing CDP screencast
+  entirely for some lower-level Chromium capture (native video encode via tabCapture-style APIs,
+  akin to what `puppeteer-stream` does in Node) -- a real architecture change, not a tuning
+  knob, and it's unconfirmed whether an equivalent is reachable from headless Chromium via
+  Playwright/.NET at all.
+- **Not started.** Recommended next step if pursued: a short, time-boxed research spike to
+  confirm whether such a capture path is actually reachable before committing to a rewrite --
+  explicitly flagged as a decision for the user, not decided here.
+
 ## Implementation notes (2026-07-12)
 
 Steps 1-3 implemented on branch/worktree `video_codeing_enhancement`. `dotnet build` clean,
