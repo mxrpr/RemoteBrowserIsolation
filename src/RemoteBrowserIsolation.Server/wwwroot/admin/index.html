@@ -327,6 +327,16 @@
       }
     }
 
+    // Enter in any login field submits, same as clicking loginBtn -- these inputs aren't inside a
+    // <form>, so Enter wouldn't otherwise trigger anything.
+    for (const el of [document.getElementById('email'), document.getElementById('password'), passwordConfirm]) {
+      el.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          document.getElementById('loginBtn').click();
+        }
+      });
+    }
+
     document.getElementById('loginBtn').onclick = async () => {
       loginError.textContent = '';
       const email = document.getElementById('email').value.trim();
