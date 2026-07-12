@@ -1,0 +1,30 @@
+<!doctype html>
+<html><body style="margin:0;font-family:sans-serif;background:#fff;width:1280px;height:720px">
+<!-- Mimics typical screencast content: mostly static layout/text (like a real web page), with
+     one small animated region (a ticking clock, ~200x40px out of 1280x720) -- the realistic
+     counterpart to animated.html's adversarial full-frame repaint, so libvpx's static-thresh
+     macroblock-skip actually gets to do its job. -->
+<div style="padding:40px">
+  <h1>Static Page Content</h1>
+  <p style="max-width:900px;line-height:1.6">
+    Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt
+    ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation
+    ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in
+    reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur.
+  </p>
+  <table style="border-collapse:collapse">
+    <tr><td style="border:1px solid #ccc;padding:8px">Row 1</td><td style="border:1px solid #ccc;padding:8px">Value A</td></tr>
+    <tr><td style="border:1px solid #ccc;padding:8px">Row 2</td><td style="border:1px solid #ccc;padding:8px">Value B</td></tr>
+    <tr><td style="border:1px solid #ccc;padding:8px">Row 3</td><td style="border:1px solid #ccc;padding:8px">Value C</td></tr>
+  </table>
+  <div style="margin-top:30px;width:400px;height:200px;background:linear-gradient(135deg,#4a90d9,#2c3e50)"></div>
+  <p id="clock" style="font-family:monospace;font-size:24px"></p>
+</div>
+<script>
+function tick() {
+  document.getElementById('clock').textContent = new Date().toISOString();
+  requestAnimationFrame(tick);
+}
+requestAnimationFrame(tick);
+</script>
+</body></html>

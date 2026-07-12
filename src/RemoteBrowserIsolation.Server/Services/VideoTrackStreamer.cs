@@ -116,22 +116,25 @@ public sealed class VideoTrackStreamer(ILogger<VideoTrackStreamer> logger) : IVi
         // faster per frame than the default "good" deadline at 720p.
         // "static-thresh=100" lets the encoder skip macroblocks whose residual is below the
         // threshold -- screencast content is mostly static between frames, so this both speeds
-        // up encoding and saves bits. "token_partitions=3" splits the bitstream into 8
-        // independent partitions so the encoder threads (SetThreadCount below) can parallelise
-        // within one frame. (row-mt is VP9-only, does not apply to VP8.)
+        // up encoding and saves bits. (row-mt is VP9-only, does not apply to VP8. A
+        // "token_partitions" option was tried here to enable within-frame thread parallelism but
+        // this FFmpeg build's libvpx wrapper doesn't expose it -- av_opt_set logs "Option not
+        // found" and it's silently ignored. Not needed anyway: FFmpeg's libvpx encoder derives
+        // the token-partition count automatically from thread_count below.)
         var realtimeOptions = new Dictionary<string, string>
         {
             ["deadline"] = "realtime",
             ["cpu-used"] = "8",
             ["lag-in-frames"] = "0",
             ["static-thresh"] = "100",
-            ["token_partitions"] = "3",
         };
         using var encoder = new FFmpegVideoEncoder(realtimeOptions);
         encoder.SetBitrate(TargetBitrate, null, MinBitrate, MaxBitrate);
         // libvpx multithreading: thread_count is applied to the codec context when the encoder
-        // is initialised on the first frame. Without this the encode runs on a single core and
-        // is the dominant per-frame cost (~15-20ms at 720p).
+        // is initialised on the first frame, and also drives libvpx's automatic token-partition
+        // count (so multiple threads can actually work on one frame, not just across frames).
+        // Without this the encode runs on a single core and is the dominant per-frame cost
+        // (~15-20ms at 720p).
         encoder.SetThreadCount(Environment.ProcessorCount);
 
         var lastFrameAt = Stopwatch.GetTimestamp();
