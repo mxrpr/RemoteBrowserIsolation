@@ -311,6 +311,47 @@ Design points:
 - **Note:** `FFmpegVideoEncoder`'s ctor already accepts an `AVHWDeviceType` parameter — the
   probe/selection can likely be built on that rather than a new encoder class.
 
+### Implemented (2026-07-12) — setting + probe, NOT the hardware encode path
+
+Scope was explicitly narrowed with the user before building: the dropdown/setting/probe ships
+now; the actual VAAPI/NVENC encode pipeline does not exist yet (that's still deferred, unstarted
+-- would be its own follow-up). Given that, `Gpu` mode was made to **always fail loudly**
+(`InvalidOperationException`, caught by `WebRtcSessionManager`'s existing error path -> logs
+`LogError`, closes the peer connection) rather than silently running on CPU, whether or not
+hardware was actually detected -- there being no code path able to use detected hardware, a
+"success" would be misleading either way.
+
+**What was built:**
+- `Models/VideoEncoderMode.cs` (`Auto`/`Cpu`/`Gpu` enum).
+- `Data/Entities/VideoEncoderSetting.cs` + migration (`20260712120000_AddVideoEncoderSetting`,
+  hand-authored -- `dotnet-ef` isn't runnable in this environment, missing `libhostfxr.so`; the
+  migration/designer/snapshot files were written by hand matching the existing migrations'
+  exact format). Single row, `Id` fixed at 1 (`ValueGeneratedNever` in `OnModelCreating` --
+  needed explicitly, since EF's default int-PK convention assumes autoincrement and without
+  this override the startup `db.Database.Migrate()` throws `PendingModelChangesWarning`).
+- `Services/GpuEncoderProbe.cs` -- a REAL probe, not a stub: attempts
+  `ffmpeg.av_hwdevice_ctx_create` for CUDA then VAAPI, caches the result for process lifetime.
+  On the dev machine used for testing, this genuinely detected `AV_HWDEVICE_TYPE_VAAPI available`.
+- `Services/VideoEncoderSettingsStore.cs` -- singleton, in-memory-cached, scoped-`AppDbContext`-
+  via-`IServiceScopeFactory` pattern copied from `RootCaStore`.
+- `Rest/Admin/AdminVideoEncoderSettingsEndpoints.cs` -- `GET`/`PUT /api/admin/settings/video-encoder`,
+  `RequireAuthorization()`, same shape as the other admin CRUD endpoints.
+- `wwwroot/admin/index.html` -- new "Settings" nav section: mode `<select>` + a status line
+  showing the live probe result (`GET`-loaded and refreshed after every `PUT`), matching the
+  existing Root CA section's "show detected reality" convention.
+- `VideoTrackStreamer.CheckVideoEncoderModeAsync` -- called as the first line of `StartAsync`,
+  before any CDP/capture work starts. `Cpu` is a no-op; `Auto` probes, logs the outcome
+  (`LogInformation`), and always proceeds on CPU; `Gpu` always throws (see above).
+
+**Verified against a live server** (fresh temp DB, `Auto`/`Cpu`/`Gpu` all exercised via the
+WebRTC test client): `Gpu` mode correctly aborts the session with the expected log line
+(`"Video encoder mode is set to GPU and hardware was detected (AV_HWDEVICE_TYPE_VAAPI
+available), but the GPU encode pipeline is not implemented yet."`); `Auto` and `Cpu` both
+succeed normally (video flows, matches pre-feature behavior). `GET`/`PUT` round-trip and cache
+invalidation confirmed via curl. Full `tests/e2e/run_e2e.sh` suite passes with the feature in
+place (still catches the `everyNthFrame` regression noted above, unrelated to this feature but
+found while testing it).
+
 ---
 
 ## Execution order & verification protocol
@@ -439,7 +480,23 @@ rather than a change in per-frame algorithmic cost.
 (~16.4-17.5ms either way, no further drop) -- the CPU-contention relief that made nth=2 pay off
 had already saturated. All that changed going 2->3 was fewer frames delivered per second
 (~82 -> ~55 per 20s window, i.e. ~4.1fps -> ~2.75fps on this test box), a real user-visible
-smoothness cost with zero additional speed benefit. Kept at `EveryNthFrame = 2`.
+smoothness cost with zero additional speed benefit. Kept at `EveryNthFrame = 2` at the time.
+
+**`EveryNthFrame` reverted entirely (2026-07-12) -- regression found by the e2e suite.** While
+implementing Step 4 (below), `tests/e2e/run_e2e.sh` caught a real functional break:
+`everyNthFrame=2` sends **zero** screencast frames for a page that paints once and never
+repaints again (`tests/e2e/fixtures/keytest_server.py`'s keytest.html has no animation loop).
+CDP's `everyNthFrame` counter apparently doesn't special-case the first frame -- a page whose
+only paint doesn't land on an emitted count gets no screencast frame at all, ever. This isn't
+just a test artifact: plenty of real pages settle after initial load with no ongoing
+repaint (no CSS animation, no blinking cursor, nothing), so real users could get frozen/blank
+video. Confirmed by reproducing with the WebRTC test client (`videoPacketsReceived: 0` over a
+full 20s window) and by the full e2e suite failing on both video modes; reverted
+`EveryNthFrame`/`everyNthFrame` entirely and reran the suite to confirm all 4 modes pass again.
+Net effect: the ~25-29% gain from this step is gone; Steps 1-3's ~16-25% (JPEG-quality-preserving)
+gain stands. If frame-skipping is revisited, it needs a strategy that still guarantees at least
+one frame reaches the client (e.g. always send frame 1, or a fallback timer), not a blind
+CDP-side counter.
 
 ## Open question -- "smarter protocol" (partial/dirty-rect updates)
 
