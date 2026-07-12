@@ -48,6 +48,11 @@ builder.Services.AddSingleton<IHtmlNoInputInjector, HtmlNoInputInjector>();
 // reasoning as RootCaStore.
 builder.Services.AddSingleton<ILeafCertificateMinter, LeafCertificateMinter>();
 
+// Singleton -- hardware probe result and configured mode must be shared/cached across every video
+// session, same reasoning as RootCaStore.
+builder.Services.AddSingleton<IGpuEncoderProbe, GpuEncoderProbe>();
+builder.Services.AddSingleton<IVideoEncoderSettingsStore, VideoEncoderSettingsStore>();
+
 builder.Services.Configure<ProxyOptions>(builder.Configuration.GetSection("Proxy"));
 builder.Services.Configure<WebRtcOptions>(builder.Configuration.GetSection("WebRtc"));
 
@@ -168,6 +173,7 @@ app.MapAdminAuthEndpoints();
 app.MapAdminSiteEndpoints();
 app.MapAdminLogEndpoints();
 app.MapAdminRootCaEndpoints();
+app.MapAdminVideoEncoderSettingsEndpoints();
 
 // Public browse surface: policy-resolution hint plus the video-mode WebRTC session start. HTML
 // mode no longer has an app-level endpoint -- it's served directly by the TLS-intercepting proxy

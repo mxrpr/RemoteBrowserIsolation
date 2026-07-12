@@ -17,6 +17,8 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
 
     public DbSet<RootCertificateAuthority> RootCertificateAuthorities => Set<RootCertificateAuthority>();
 
+    public DbSet<VideoEncoderSetting> VideoEncoderSettings => Set<VideoEncoderSetting>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         // Unique email so bootstrap-or-login can look up "the" admin unambiguously; comparisons in
@@ -31,6 +33,13 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
         modelBuilder.Entity<SitePolicy>()
             .HasIndex(p => p.HostPattern)
             .IsUnique();
+
+        // Id is always explicitly set to 1 by VideoEncoderSettingsStore (single whole-server
+        // settings row, not an auto-incrementing list) — override EF's default int-PK convention
+        // so it doesn't try to autoincrement.
+        modelBuilder.Entity<VideoEncoderSetting>()
+            .Property(s => s.Id)
+            .ValueGeneratedNever();
 
         base.OnModelCreating(modelBuilder);
     }

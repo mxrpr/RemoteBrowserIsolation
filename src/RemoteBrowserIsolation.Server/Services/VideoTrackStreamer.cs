@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Threading.Channels;
 using Microsoft.Playwright;
+using RemoteBrowserIsolation.Server.Models;
 using SIPSorcery.Net;
 using SIPSorceryMedia.Abstractions;
 using SIPSorceryMedia.FFmpeg;
@@ -19,7 +20,10 @@ public interface IVideoTrackStreamer
 // no SIPSorcery-imposed throughput ceiling (the data channel's SCTP sender drains at a fixed
 // ~75KB/s), and VP8 delta frames make unchanged screen regions nearly free, so quality and
 // resolution can both go up while latency goes down.
-public sealed class VideoTrackStreamer(ILogger<VideoTrackStreamer> logger) : IVideoTrackStreamer
+public sealed class VideoTrackStreamer(
+    ILogger<VideoTrackStreamer> logger,
+    IVideoEncoderSettingsStore videoEncoderSettingsStore,
+    IGpuEncoderProbe gpuEncoderProbe) : IVideoTrackStreamer
 {
     private const int JpegQuality = 80;
 
@@ -43,6 +47,8 @@ public sealed class VideoTrackStreamer(ILogger<VideoTrackStreamer> logger) : IVi
     // stateful VP8 encoder strictly single-threaded.
     public async Task StartAsync(RTCPeerConnection pc, HeadlessSession session, Uri targetUrl, CancellationToken cancellationToken = default)
     {
+        await CheckVideoEncoderModeAsync(targetUrl, cancellationToken);
+
         var cdp = await session.Context.NewCDPSessionAsync(session.Page);
 
         var mailbox = Channel.CreateBounded<byte[]>(new BoundedChannelOptions(1)
@@ -101,6 +107,41 @@ public sealed class VideoTrackStreamer(ILogger<VideoTrackStreamer> logger) : IVi
             ["maxWidth"] = 4096,
             ["maxHeight"] = 4096,
         });
+    }
+
+    // Checks the admin-configured video encoder mode before any capture/encode work starts.
+    // Cpu (the only mode with a real encode path today) is a no-op. Auto probes for hardware and
+    // logs what it found, but always proceeds on CPU regardless -- there is no GPU encode
+    // pipeline implemented yet (see plans/11_video_pipeline_speedup.md Step 4). Gpu always throws
+    // -- forcing hardware encode must fail loudly rather than silently falling back to CPU, so a
+    // misconfigured/unimplemented GPU path is visible to the admin (surfaces as the existing
+    // "Failed to start rendering session" error path in WebRtcSessionManager) instead of quietly
+    // costing nothing.
+    private async Task CheckVideoEncoderModeAsync(Uri targetUrl, CancellationToken cancellationToken)
+    {
+        VideoEncoderMode mode = await videoEncoderSettingsStore.GetModeAsync(cancellationToken);
+
+        switch (mode)
+        {
+            case VideoEncoderMode.Cpu:
+                return;
+
+            case VideoEncoderMode.Auto:
+                GpuProbeResult autoProbe = await gpuEncoderProbe.ProbeAsync();
+                logger.LogInformation(
+                    "Video encoder mode Auto for {Url}: {Description} -- no GPU encode pipeline implemented yet, using CPU",
+                    targetUrl, autoProbe.Description);
+                return;
+
+            case VideoEncoderMode.Gpu:
+                GpuProbeResult gpuProbe = await gpuEncoderProbe.ProbeAsync();
+                throw new InvalidOperationException(gpuProbe.Available
+                    ? $"Video encoder mode is set to GPU and hardware was detected ({gpuProbe.Description}), but the GPU encode pipeline is not implemented yet. Switch to Auto or CPU."
+                    : $"Video encoder mode is set to GPU but no hardware encoder was detected ({gpuProbe.Description}).");
+
+            default:
+                throw new ArgumentOutOfRangeException(nameof(mode), mode, "Unknown video encoder mode.");
+        }
     }
 
     // Single consumer: decodes the newest JPEG, VP8-encodes it, and pushes it onto the RTP track,
