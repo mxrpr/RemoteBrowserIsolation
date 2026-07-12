@@ -19,6 +19,8 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
 
     public DbSet<VideoEncoderSetting> VideoEncoderSettings => Set<VideoEncoderSetting>();
 
+    public DbSet<LogLevelSetting> LogLevelSettings => Set<LogLevelSetting>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         // Unique email so bootstrap-or-login can look up "the" admin unambiguously; comparisons in
@@ -38,6 +40,12 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
         // settings row, not an auto-incrementing list) — override EF's default int-PK convention
         // so it doesn't try to autoincrement.
         modelBuilder.Entity<VideoEncoderSetting>()
+            .Property(s => s.Id)
+            .ValueGeneratedNever();
+
+        // Same single-row-settings override as VideoEncoderSetting above -- Id is always explicitly
+        // set to 1 by LogLevelSettingsStore.
+        modelBuilder.Entity<LogLevelSetting>()
             .Property(s => s.Id)
             .ValueGeneratedNever();
 

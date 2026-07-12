@@ -256,6 +256,19 @@
               <option value="Gpu">GPU</option>
             </select>
             <div id="videoEncoderError" class="error-row"></div>
+
+            <h2 style="margin-top: 24px;">Log level</h2>
+            <div id="logLevelStatus">Loading...</div>
+            <select id="logLevel" style="margin-top: 14px;">
+              <option value="Trace">Trace</option>
+              <option value="Debug">Debug</option>
+              <option value="Information">Information</option>
+              <option value="Warning">Warning</option>
+              <option value="Error">Error</option>
+              <option value="Critical">Critical</option>
+              <option value="None">None</option>
+            </select>
+            <div id="logLevelError" class="error-row"></div>
           </section>
         </div>
       </div>
@@ -301,6 +314,7 @@
       loadLogs();
       loadRootCa();
       loadVideoEncoderSetting();
+      loadLogLevelSetting();
     }
 
     // Tracks the last-known bootstrap state so the login handler knows whether to demand a
@@ -649,6 +663,40 @@
       } catch (err) {
         videoEncoderError.textContent = 'Failed to save: ' + err.message;
         loadVideoEncoderSetting();
+      }
+    };
+
+    // Loads the current server-wide log level and sets the <select>'s value. This level fully
+    // replaces the appsettings.json Logging:LogLevel config for every category (not just a floor
+    // on top of it) -- see AdminLogLevelSettingsEndpoints.
+    async function loadLogLevelSetting() {
+      const status = document.getElementById('logLevelStatus');
+      status.textContent = 'Loading...';
+      try {
+        const resp = await authedFetch('/api/admin/settings/log-level');
+        const setting = await resp.json();
+        document.getElementById('logLevel').value = setting.level;
+        status.textContent = 'Current level: ' + setting.level;
+      } catch (e) {
+        status.textContent = 'Failed to load: ' + e.message;
+      }
+    }
+
+    document.getElementById('logLevel').onchange = async (e) => {
+      const logLevelError = document.getElementById('logLevelError');
+      const logLevelStatus = document.getElementById('logLevelStatus');
+      logLevelError.textContent = '';
+      try {
+        const resp = await authedFetch('/api/admin/settings/log-level', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ level: e.target.value }),
+        });
+        const setting = await resp.json();
+        logLevelStatus.textContent = 'Current level: ' + setting.level;
+      } catch (err) {
+        logLevelError.textContent = 'Failed to save: ' + err.message;
+        loadLogLevelSetting();
       }
     };
 
