@@ -84,7 +84,7 @@ public sealed class LeafCertificateMinter(IRootCaStore rootCaStore) : ILeafCerti
 
     public void ClearCache() => _cache.Clear();
 
-    private static bool IsNearExpiry(X509Certificate2 cert) => cert.NotAfter - DateTime.Now < RenewalWindow;
+    internal static bool IsNearExpiry(X509Certificate2 cert) => cert.NotAfter - DateTime.Now < RenewalWindow;
 
     private async Task<X509Certificate2?> MintAsync(string hostname, CancellationToken cancellationToken)
     {

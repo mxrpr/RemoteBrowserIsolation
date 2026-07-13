@@ -150,7 +150,7 @@ public sealed unsafe class MjpegToI420Decoder : IDisposable
     // (via av_image_fill_arrays) assumes standard tightly-packed planar layout with no row
     // padding, while FFmpeg's decoded frame linesize is often wider than the plane's pixel
     // width (e.g. a 1280-wide plane may have linesize 1312).
-    private static void CopyPlane(IntPtr source, int sourceStride, IntPtr destination, int rowBytes, int width, int height)
+    internal static void CopyPlane(IntPtr source, int sourceStride, IntPtr destination, int rowBytes, int width, int height)
     {
         for (var row = 0; row < height; row++)
         {
