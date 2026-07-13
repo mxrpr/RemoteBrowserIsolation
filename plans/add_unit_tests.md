@@ -15,12 +15,12 @@ Ordered, self-contained parts for a plan→implement→review→test pipeline. D
 - [x] Part 7: Test `LeafCertificateMinter.cs` (P2) — cover static `IsNearExpiry` boundaries and `MintAsync` end-to-end against a fake `IRootCaStore` with a real self-signed test CA (SAN/EKU/basic-constraints assertions, non-RSA/expired/no-CA cases). Keep case count small (RSA keygen is slow); no OS cert store or network.
 - [x] Part 8: Test `MjpegToI420Decoder.CopyPlane` (P2) — make `CopyPlane` `internal` + `[InternalsVisibleTo]` (or reflection) and test stride-with-padding packed copy and stride-equals-width no-op. `TryDecode` stays out of scope (no FFmpeg seam).
 - [x] Part 9: Test `PageDownloader.cs` (P3) — cover `DownloadAsync`: non-http(s) scheme rejected, 2xx success with body, non-2xx failure + status, timeout, and caught `HttpRequestException`, using a fake `HttpMessageHandler` (no real network).
-- [ ] Part 10: Test `PolicyEngine.cs` (P4) — `ResolveAsync` over EF Core InMemory: exact-host match wins, subdomain match, longest-pattern-wins, deny-by-default on no match, each `ViewMode` returned correctly.
-- [ ] Part 11: Test `AdminAuthService.cs` (P4) — `LoginOrBootstrapAsync`: first-login bootstrap, subsequent correct login, wrong password, case-insensitive email; issued JWT decodes with expected claims/expiry from config.
-- [ ] Part 12: Test `LogLevelSettingsStore.cs` (P4) — `GetLevelAsync` cache-hit vs DB-fallback vs default-Information-when-unset; `SetLevelAsync` upserts single row and mirrors to `LogLevelState`.
-- [ ] Part 13: Test `VideoEncoderSettingsStore.cs` (P4) — same cache/upsert-by-fixed-id pattern, default `VideoEncoderMode.Auto`.
-- [ ] Part 14: Test `RequestLogService.cs` (P4) — `LogAsync` maps `Uri`→`Url`/`Host` fields correctly and persists a row.
-- [ ] Part 15: Test `RootCaStore.cs` (P4) — `GetActiveCaAsync` loads once and caches, `Invalidate` forces reload, PKCS12 blob round-trips.
+- [x] Part 10: Test `PolicyEngine.cs` (P4) — `ResolveAsync` over EF Core InMemory: exact-host match wins, subdomain match, longest-pattern-wins, deny-by-default on no match, each `ViewMode` returned correctly.
+- [x] Part 11: Test `AdminAuthService.cs` (P4) — `LoginOrBootstrapAsync`: first-login bootstrap, subsequent correct login, wrong password, case-insensitive email; issued JWT decodes with expected claims/expiry from config.
+- [x] Part 12: Test `LogLevelSettingsStore.cs` (P4) — `GetLevelAsync` cache-hit vs DB-fallback vs default-Information-when-unset; `SetLevelAsync` upserts single row and mirrors to `LogLevelState`.
+- [x] Part 13: Test `VideoEncoderSettingsStore.cs` (P4) — same cache/upsert-by-fixed-id pattern, default `VideoEncoderMode.Auto`.
+- [x] Part 14: Test `RequestLogService.cs` (P4) — `LogAsync` maps `Uri`→`Url`/`Host` fields correctly and persists a row.
+- [x] Part 15: Test `RootCaStore.cs` (P4) — `GetActiveCaAsync` loads once and caches, `Invalidate` forces reload, PKCS12 blob round-trips.
 
 ## Detailed scope notes (per part)
 
