@@ -65,6 +65,16 @@ Single ASP.NET Core (net9.0) project at `src/RemoteBrowserIsolation.Server`, SIP
 Playwright for headless Chromium, SQLite for policy/admin/CA storage. See `CLAUDE.md` for the
 detailed internals (data channel negotiation, signaling flow, service responsibilities).
 
+A parallel **Go rewrite** of the same server lives at `src/rbi-go` (module `rbi-go`) — same REST
+API, same `wwwroot/` UI, same TLS-intercepting-proxy/video-mode split, but its own SQLite DB file
+(`rbi-go.db`), own JWT signing, own env-var config (`RBI_*`). It uses `pion/webrtc` for WebRTC,
+`chromedp` for headless Chromium (a real Chromium binary on `PATH`, not a bundled download), and
+cgo bindings to `libvpx` for VP8 (behind the `vpx` build tag — plain `go build` uses a stub that
+errors at runtime if video mode is exercised without it). See `plans/go_rewrite.md` for the full
+design decisions. The two backends can run side by side (different DB files, different default
+container names) but are not required to run together — pick one. Go-specific install/usage steps
+are in their own subsections below.
+
 ---
 
 ## Developer installation
@@ -162,6 +172,69 @@ Steps to get a working dev environment from a clean machine.
     ```bash
     ./startTests.sh
     ```
+
+---
+
+## Developer installation (Go backend)
+
+Alternative to the C# backend above — same API/UI, different runtime. Requires the Go toolchain
+instead of .NET.
+
+1. **Clone the repo** (skip if already done above).
+
+2. **Install Go 1.26+**
+   Follow https://go.dev/doc/install for your OS, then confirm:
+   ```bash
+   go version   # expect 1.26 or newer
+   ```
+
+3. **(Optional but recommended) Install libvpx dev headers for real VP8 encoding**
+   Without this, the app still builds and runs, but video mode uses a stub encoder that errors at
+   runtime if actually exercised.
+   ```bash
+   # Debian/Ubuntu
+   sudo apt-get install libvpx-dev
+   ```
+
+4. **Build**
+   ```bash
+   cd src/rbi-go
+   go build -tags vpx ./...   # drop "-tags vpx" if you skipped step 3
+   ```
+   This pulls all Go module dependencies (`pion/webrtc`, `chromedp`, `go-pkcs12`, etc.)
+   automatically.
+
+5. **Install a Chromium/Chrome binary on `PATH`**
+   `chromedp` doesn't bundle a browser — it drives whatever it finds. On PATH auto-detection order:
+   `chromium`, `chromium-browser`, `google-chrome`, `google-chrome-stable`. Install one via your
+   package manager, or set `RBI_BROWSER_CHROMIUM_PATH=/path/to/binary` to skip auto-detection.
+
+6. **Run the dev server**
+   From the repo root:
+   ```bash
+   ./startRBI_go_dev.sh
+   ```
+   Runs from `src/rbi-go/` so the default `WwwRoot` (`../RemoteBrowserIsolation.Server/wwwroot`)
+   resolves correctly — the Go backend reuses the same `wwwroot/` as the C# project, no separate
+   copy. Watch the startup log for the bound address (default `http://localhost:5139`, same
+   default port as the C# backend — don't run both dev servers at once without overriding one via
+   `RBI_PORT`).
+
+7. **Verify it's up**
+   Browser → `http://localhost:5139/health` — should show `{"status":"ok"}`.
+
+8. **Generate a root CA, bootstrap admin, add a site policy, configure the browser proxy**
+   Identical to steps 7–10 in the C# Developer installation above — same admin UI, same
+   `./scripts/generate_root_ca.sh`, same PFX upload flow. The Go backend's own SQLite file
+   (`rbi-go.db`, default in the working directory) is separate from the C# backend's `rbi.db`, so
+   policies/admin/CA are not shared between the two — set them up again if you're switching
+   backends rather than running one continuously.
+
+9. **Run tests**
+   ```bash
+   ./startTests_go.sh
+   ```
+   Runs `go test ./...` (no `-tags vpx` needed — the test suite doesn't require `libvpx-dev`).
 
 ---
 
@@ -269,3 +342,67 @@ FFmpeg on the host yourself. Requires only Docker.
     docker rm -f rbi
     rm -rf ./data ./certs
     ```
+
+---
+
+## Docker installation (Go backend)
+
+Same turnkey idea as the C# Docker path above, built from `Dockerfile.go` instead — bundles a real
+Chromium binary + `libvpx` inside the image, two-stage build (Go build stage compiles with
+`-tags vpx`, runtime stage only needs the `libvpx` shared lib, not the dev headers).
+
+1. **Clone the repo + install Docker** — same as steps 1–2 in the C# Docker installation above.
+
+2. **Generate a root CA** — same as step 3 above (`./scripts/generate_root_ca.sh`); the same
+   `certs/rootCA.pfx`/`.crt` work for either backend.
+
+3. **Build and run**
+   ```bash
+   ./scripts/run_docker_go.sh
+   ```
+   This script:
+   - builds the `rbi-go:latest` image (`scripts/build_docker_go.sh`) — the Dockerfile does the Go
+     build in-image (fast, no separate host-side compile step needed, unlike the C# path),
+   - creates/reuses the same local `./data` directory, bind-mounted at `/app/data` — `rbi-go.db`
+     and the C# container's `rbi.db` live side by side there without collision,
+   - starts the container **named `rbi-go`** (not `rbi` — the two containers don't collide and can
+     run at the same time, but check for port conflicts if you do, see step 6), publishing
+     `5139/tcp` (app), `8080/tcp` (forward proxy), `40000-40009/udp` (WebRTC media).
+
+4. **Open the app in your browser**
+   Go to `http://localhost:5139/health` — should show `{"status":"ok"}`.
+
+5. **Bootstrap admin, upload root CA, configure browser proxy, add a site policy**
+   Identical flow to steps 6–10 in the C# Docker installation above (admin console at
+   `http://localhost:5139/admin/`, video mode at `http://localhost:5139/index.html`). This
+   container's policies/admin/CA are stored in its own `rbi-go.db` — separate from the C#
+   container's `rbi.db` even though both bind-mount the same `./data` directory.
+
+6. **Running both containers at once**
+   On Linux, both `run_docker.sh` and `run_docker_go.sh` use `--network host`. The app ports don't
+   collide by default (C# on `5000`, Go on `5139`), but **both default to proxy port `8080`** — the
+   second container to start will fail to bind it. Override one via `Proxy__Port` (C#) or
+   `RBI_PROXY_PORT` (Go) if you need both proxies running simultaneously. On Mac/Windows
+   (`-p` mappings), adjust the published host ports instead.
+
+7. **Non-default host setups**
+   Same idea as step 11 in the C# Docker installation, different env var names:
+   ```bash
+   RBI_WEBRTC_ADVERTISED_IP=<host-reachable-ip> RBI_SELF_HOST=<host-reachable-address> ./scripts/run_docker_go.sh
+   ```
+   - `RBI_WEBRTC_ADVERTISED_IP` — baked into the WebRTC answer SDP's host candidate.
+   - `RBI_SELF_HOST` — unlike the C# container's array-append trick, this replaces the whole
+     self-host list; the script builds the full value (`localhost,127.0.0.1,<extra>`) for you.
+
+8. **Stop / re-run**
+   ```bash
+   docker stop rbi-go
+   ./scripts/run_docker_go.sh   # rebuilds and restarts; ./data is preserved
+   ```
+
+9. **Reset everything** (only if you want to wipe state — this also removes the C# backend's data
+   if you haven't backed it up, since both share `./data`)
+   ```bash
+   docker rm -f rbi-go
+   rm -rf ./data ./certs
+   ```
