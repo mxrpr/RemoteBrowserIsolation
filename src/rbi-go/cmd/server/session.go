@@ -37,14 +37,16 @@ type answerResponse struct {
 	SDP string `json:"sdp"`
 }
 
-// Viewport bounds for client-requested dimensions. Mirrors the C#
-// WebRtcSessionManager constants: lower bound guards degenerate values;
-// upper bound caps the VP8 encoder's per-frame CPU cost.
+// Viewport bounds for client-requested dimensions. Lower bound guards
+// degenerate values; upper bound caps the VP8 encoder's per-frame CPU cost.
+// maxViewportWidth/Height raised to 1080p (diverges from the C# backend's
+// 720p cap) alongside the bitrate bump in encoder_vpx.go's
+// vpxTargetBitrateKbps.
 const (
 	minViewportWidth  = 320
 	minViewportHeight = 180
-	maxViewportWidth  = 1280
-	maxViewportHeight = 720
+	maxViewportWidth  = 1920
+	maxViewportHeight = 1080
 	defViewportWidth  = 1280
 	defViewportHeight = 720
 

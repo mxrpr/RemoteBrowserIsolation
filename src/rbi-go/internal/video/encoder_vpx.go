@@ -10,7 +10,8 @@
 //   - lag-in-frames=0: forbids lookahead, keeping latency to one frame.
 //   - static-thresh=100: skip macroblocks below the residual threshold;
 //     screencast content is mostly static between frames.
-//   - Bitrate: 3 Mbit/s target, 1–4 Mbit/s range.
+//   - Bitrate: 6 Mbit/s target (bumped from 3 Mbit/s to match the raised
+//     1080p viewport cap in cmd/server/session.go).
 package video
 
 /*
@@ -128,12 +129,13 @@ import (
 )
 
 const (
-	// vpxTargetBitrateKbps is the CBR target (3 Mbit/s), matching the C# VideoTrackStreamer.
-	vpxTargetBitrateKbps = 3000
+	// vpxTargetBitrateKbps is the CBR target (6 Mbit/s), raised from the C#
+	// VideoTrackStreamer's 3 Mbit/s to match the 1080p viewport cap.
+	vpxTargetBitrateKbps = 6000
 
-	// vpxOutputBufSize is the maximum encoded frame size we allocate. A 1280×720
-	// keyframe at 3 Mbit/s is typically <50 KB; 512 KB provides a generous margin.
-	vpxOutputBufSize = 512 * 1024
+	// vpxOutputBufSize is the maximum encoded frame size we allocate. A 1920×1080
+	// keyframe at 6 Mbit/s is typically <150 KB; 1 MB provides a generous margin.
+	vpxOutputBufSize = 1024 * 1024
 
 	// vpxErrBufSize is the size of the C error string buffer used by vpxEncCreate
 	// and vpxEncodeFrame. 512 bytes is more than enough for any libvpx error string.
