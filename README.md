@@ -77,6 +77,47 @@ are in their own subsections below.
 
 ---
 
+## Used technology (Go backend, `rbi-go`)
+
+- **Go** server (`cmd/server`), module `rbi-go`.
+- **`chromedp`** — pure-Go CDP (Chrome DevTools Protocol) client, drives a real headless Chromium
+  binary on `PATH` (not a bundled download). One dedicated Chrome **process** per video-mode
+  session (not a shared browser with per-session contexts — new headless Chrome's
+  `Target.createBrowserContext` doesn't support opening a new tab inside it), so isolation is at
+  the OS-process level.
+- **`pion/webrtc`** — Go WebRTC stack. Handles the peer connection, the pre-negotiated data channel
+  (input events), and the VP8 media track back to the client. Server is always the WebRTC
+  *answerer*; the browser client is the *offerer*.
+- **`libvpx`** via cgo — VP8 video encoding (behind the `vpx` build tag; a plain `go build` links a
+  stub that errors at runtime if video mode is exercised without it).
+- **`libjpeg-turbo`** via cgo — decodes the JPEG frames Chrome's `Page.startScreencast` produces,
+  before they're re-encoded to VP8.
+- **SQLite** — policy/site table, admin auth, root CA storage (`rbi-go.db`, separate file from the
+  C# backend's `rbi.db` so both can share the same `./data` bind mount).
+
+### How video-mode (RBI) generation works, per session
+
+1. Client loads `index.html?url=<target>`; JS resolves policy via `/api/policy/resolve` to confirm
+   the host is tagged `VideoAllowInput`/`VideoNoInput`.
+2. Client builds a WebRTC offer (data channel pre-negotiated at id 0) and POSTs it to
+   `/api/session/offer`.
+3. Server allocates a fresh Chrome process for the session and navigates it to the target URL.
+4. Server issues CDP `Page.startScreencast`; Chrome pushes JPEG-encoded frames of its own render,
+   throttled to every 2nd repaint, viewport capped at 720p.
+5. Each frame lands in a capacity-1 "latest-wins" mailbox channel — a frame the encoder hasn't
+   consumed yet gets dropped rather than queued, so a slow encoder can't build backlog.
+6. A single per-session goroutine drains the mailbox: JPEG → I420 (libjpeg-turbo) → VP8
+   (libvpx, CBR, 3 Mbit/s target) → written to the WebRTC track via `pion`.
+7. A forced VP8 keyframe is emitted every 5s so a late-joining or packet-loss client can resync.
+8. Client mouse/keyboard input travels back over the same data channel and is replayed on the
+   session's Chrome tab via CDP `Input.dispatchMouseEvent`/`dispatchKeyEvent`.
+
+Each concurrent video-mode session keeps a full Chrome process alive and continuously
+rendering/encoding for the session's duration (not a one-shot fetch), which is the dominant cost
+when sizing concurrent-user capacity.
+
+---
+
 ## Developer installation
 
 Steps to get a working dev environment from a clean machine.
