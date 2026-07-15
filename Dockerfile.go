@@ -7,9 +7,12 @@
 FROM golang:1.26-bookworm AS build
 
 # libvpx-dev: cgo headers needed at compile time for -tags vpx (encoder_vpx.go).
-# The runtime .so is installed separately in the final stage; only headers are
-# needed here, but installing libvpx-dev also pulls in libvpx7 which doesn't hurt.
-RUN apt-get update && apt-get install -y --no-install-recommends libvpx-dev \
+# libturbojpeg0-dev: cgo headers for the -tags vpx JPEG decoder
+# (decoder_turbojpeg.go). The runtime .so's are installed separately in the
+# final stage; only headers are needed here, but these -dev packages also
+# pull in the runtime libs which doesn't hurt.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libvpx-dev libturbojpeg0-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
@@ -29,13 +32,15 @@ RUN go build -tags vpx -o /out/server ./cmd/server/
 FROM debian:bookworm-slim
 
 # libvpx7: runtime shared library for the VP8 encoder compiled with -tags vpx.
+# libturbojpeg0: runtime shared library for the JPEG decoder compiled with
+#   -tags vpx (decoder_turbojpeg.go).
 # chromium: headless Chromium binary for video-mode CDP sessions via chromedp.
 #   chromedp auto-detects "chromium" in PATH — no RBI_BROWSER_CHROMIUM_PATH override needed.
 # ca-certificates: needed for TLS verification in outbound proxy connections.
 # --no-install-recommends: avoids pulling in the full X11/desktop stack that
 #   the chromium package recommends but that headless operation does not require.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        libvpx7 chromium ca-certificates \
+        libvpx7 libturbojpeg0 chromium ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /out/server /app/server
