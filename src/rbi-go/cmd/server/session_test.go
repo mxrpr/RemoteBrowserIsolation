@@ -15,7 +15,7 @@ import (
 // in the request body returns HTTP 400.
 func TestHandleSessionOffer_MalformedJSON_Returns400(t *testing.T) {
 	eng := newTestEngine(t)
-	handler := handleSessionOffer(eng, nil, nil)
+	handler := handleSessionOffer(eng, nil, nil, nil)
 
 	malformedJSON := []byte(`{invalid json}`)
 	req := httptest.NewRequest("POST", "/api/session/offer", bytes.NewReader(malformedJSON))
@@ -33,7 +33,7 @@ func TestHandleSessionOffer_MalformedJSON_Returns400(t *testing.T) {
 // the "url" field returns HTTP 400.
 func TestHandleSessionOffer_MissingURL_Returns400(t *testing.T) {
 	eng := newTestEngine(t)
-	handler := handleSessionOffer(eng, nil, nil)
+	handler := handleSessionOffer(eng, nil, nil, nil)
 
 	req := httptest.NewRequest("POST", "/api/session/offer",
 		bytes.NewReader([]byte(`{"sdp":"fake-sdp"}`)))
@@ -51,7 +51,7 @@ func TestHandleSessionOffer_MissingURL_Returns400(t *testing.T) {
 // the "sdp" field returns HTTP 400.
 func TestHandleSessionOffer_MissingSDPOnly_Returns400(t *testing.T) {
 	eng := newTestEngine(t)
-	handler := handleSessionOffer(eng, nil, nil)
+	handler := handleSessionOffer(eng, nil, nil, nil)
 
 	req := httptest.NewRequest("POST", "/api/session/offer",
 		bytes.NewReader([]byte(`{"url":"http://example.com"}`)))
@@ -69,7 +69,7 @@ func TestHandleSessionOffer_MissingSDPOnly_Returns400(t *testing.T) {
 // in the "url" field returns HTTP 400.
 func TestHandleSessionOffer_RelativeURL_Returns400(t *testing.T) {
 	eng := newTestEngine(t)
-	handler := handleSessionOffer(eng, nil, nil)
+	handler := handleSessionOffer(eng, nil, nil, nil)
 
 	req := httptest.NewRequest("POST", "/api/session/offer",
 		bytes.NewReader([]byte(`{"url":"/path/to/page","sdp":"fake-sdp"}`)))
@@ -87,7 +87,7 @@ func TestHandleSessionOffer_RelativeURL_Returns400(t *testing.T) {
 // (e.g., "example.com" without scheme) returns HTTP 400.
 func TestHandleSessionOffer_NonAbsoluteURL_Returns400(t *testing.T) {
 	eng := newTestEngine(t)
-	handler := handleSessionOffer(eng, nil, nil)
+	handler := handleSessionOffer(eng, nil, nil, nil)
 
 	req := httptest.NewRequest("POST", "/api/session/offer",
 		bytes.NewReader([]byte(`{"url":"example.com","sdp":"fake-sdp"}`)))
@@ -105,7 +105,7 @@ func TestHandleSessionOffer_NonAbsoluteURL_Returns400(t *testing.T) {
 // unmatched host (no policy) returns HTTP 403.
 func TestHandleSessionOffer_UnmatchedHost_Returns403(t *testing.T) {
 	eng := newTestEngine(t)
-	handler := handleSessionOffer(eng, nil, nil)
+	handler := handleSessionOffer(eng, nil, nil, nil)
 
 	req := httptest.NewRequest("POST", "/api/session/offer",
 		bytes.NewReader([]byte(`{"url":"http://unmatched.example.com","sdp":"fake-sdp"}`)))
@@ -126,7 +126,7 @@ func TestHandleSessionOffer_HtmlAllowInputHost_Returns409(t *testing.T) {
 	seedPolicySite(t, eng, "example.com", db.ViewModeHtmlAllowInput)
 	eng.Invalidate()
 
-	handler := handleSessionOffer(eng, nil, nil)
+	handler := handleSessionOffer(eng, nil, nil, nil)
 
 	req := httptest.NewRequest("POST", "/api/session/offer",
 		bytes.NewReader([]byte(`{"url":"http://example.com","sdp":"fake-sdp"}`)))
@@ -147,7 +147,7 @@ func TestHandleSessionOffer_HtmlNoInputHost_Returns409(t *testing.T) {
 	seedPolicySite(t, eng, "example.com", db.ViewModeHtmlNoInput)
 	eng.Invalidate()
 
-	handler := handleSessionOffer(eng, nil, nil)
+	handler := handleSessionOffer(eng, nil, nil, nil)
 
 	req := httptest.NewRequest("POST", "/api/session/offer",
 		bytes.NewReader([]byte(`{"url":"http://example.com","sdp":"fake-sdp"}`)))
@@ -165,7 +165,7 @@ func TestHandleSessionOffer_HtmlNoInputHost_Returns409(t *testing.T) {
 // have a valid JSON body with an "error" field.
 func TestHandleSessionOffer_ResponseBodyIsJSON_OnErrors(t *testing.T) {
 	eng := newTestEngine(t)
-	handler := handleSessionOffer(eng, nil, nil)
+	handler := handleSessionOffer(eng, nil, nil, nil)
 
 	// Test with missing URL (400 case).
 	req := httptest.NewRequest("POST", "/api/session/offer",

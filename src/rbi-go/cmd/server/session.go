@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"math"
 	"net"
@@ -15,6 +16,7 @@ import (
 	"rbi-go/internal/browser"
 	"rbi-go/internal/db"
 	"rbi-go/internal/policy"
+	"rbi-go/internal/settings"
 	"rbi-go/internal/video"
 	rtcmgr "rbi-go/internal/webrtc"
 
@@ -39,14 +41,17 @@ type answerResponse struct {
 
 // Viewport bounds for client-requested dimensions. Lower bound guards
 // degenerate values; upper bound caps the VP8 encoder's per-frame CPU cost.
-// maxViewportWidth/Height raised to 1080p (diverges from the C# backend's
-// 720p cap) alongside the bitrate bump in encoder_vpx.go's
-// vpxTargetBitrateKbps.
+// maxViewportWidth/Height reverted to 720p (matching the C# backend's cap):
+// a load test showed 1080p limited this host to ~7-10 concurrent video
+// sessions before CPU saturation caused failures/stalling; 720p (2.25x fewer
+// pixels to JPEG-decode + VP8-encode per frame) trades peak single-session
+// sharpness for materially higher concurrent-session capacity. See
+// encoder_vpx.go's vpxTargetBitrateKbps for the matching bitrate reversion.
 const (
 	minViewportWidth  = 320
 	minViewportHeight = 180
-	maxViewportWidth  = 1920
-	maxViewportHeight = 1080
+	maxViewportWidth  = 1280
+	maxViewportHeight = 720
 	defViewportWidth  = 1280
 	defViewportHeight = 720
 
@@ -72,6 +77,7 @@ func handleSessionOffer(
 	eng *policy.Engine,
 	webrtcMgr *rtcmgr.Manager,
 	browserMgr *browser.Manager,
+	videoStore *settings.VideoEncoderStore,
 ) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req offerRequest
@@ -139,9 +145,23 @@ func handleSessionOffer(
 		width := clampViewport(req.Width, defViewportWidth, minViewportWidth, maxViewportWidth)
 		height := clampViewport(req.Height, defViewportHeight, minViewportHeight, maxViewportHeight)
 
+		// Resolve which codec this session encodes to from the admin mode + a
+		// real hardware probe. Must happen BEFORE CreateSession because the pion
+		// track codec is fixed at answer-negotiation time and must match the
+		// encoder the pipeline will later use.
+		codec, codecErr := resolveVideoCodec(videoStore)
+		if codecErr != nil {
+			// Only reachable for Gpu mode with no usable hardware encoder — fail
+			// loudly (matches the C# "fail loudly" decision) rather than silently
+			// answering with a software codec the admin explicitly disabled.
+			slog.Error("session offer: resolve video codec", "err", codecErr)
+			writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "Video encoder unavailable: GPU mode is configured but no hardware H.264 encoder is available."})
+			return
+		}
+
 		// Negotiate the WebRTC answer synchronously (ICE gathering runs to
 		// completion before CreateSession returns, matching the no-trickle model).
-		answerSDP, rtcSess, err := webrtcMgr.CreateSession(r.Context(), req.SDP)
+		answerSDP, rtcSess, err := webrtcMgr.CreateSession(r.Context(), req.SDP, codec)
 		if err != nil {
 			slog.Error("session offer: WebRTC create session", "err", err)
 			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "Failed to create WebRTC session."})
@@ -150,7 +170,7 @@ func handleSessionOffer(
 
 		// Launch the background lifecycle manager. The HTTP response is sent
 		// immediately after; the manager runs independently of this request.
-		go manageRenderingSession(rtcSess, browserMgr, req.URL, width, height, allowKeyboard)
+		go manageRenderingSession(rtcSess, browserMgr, req.URL, width, height, allowKeyboard, codec)
 
 		writeJSON(w, http.StatusOK, answerResponse{SDP: answerSDP})
 	}
@@ -183,6 +203,7 @@ func manageRenderingSession(
 	targetURL string,
 	width, height int,
 	allowKeyboard bool,
+	codec video.Codec,
 ) {
 	// sessMu guards torndown and bSessPtr, establishing clear ownership of the
 	// browser session between the connected goroutine and the teardown path.
@@ -210,7 +231,7 @@ func manageRenderingSession(
 			// Start Chrome and the video pipeline in a goroutine so the pion
 			// state-change callback (which holds an internal mutex) returns fast.
 			go func() {
-				bSess, err := startRender(rtcSess, browserMgr, targetURL, width, height, allowKeyboard)
+				bSess, err := startRender(rtcSess, browserMgr, targetURL, width, height, allowKeyboard, codec)
 				if err != nil {
 					slog.Error("session: start render failed", "url", targetURL, "err", err)
 					if pcErr := rtcSess.PC.Close(); pcErr != nil {
@@ -282,6 +303,7 @@ func startRender(
 	targetURL string,
 	width, height int,
 	allowKeyboard bool,
+	codec video.Codec,
 ) (*browser.Session, error) {
 	// Use context.Background() for browser setup — the HTTP request context is
 	// already done. browserSetupTimeout bounds only the Chrome launch + navigation
@@ -309,8 +331,8 @@ func startRender(
 	// Mouse events are always replayed; keyboard events only if allowKeyboard.
 	video.WireInputForwarder(rtcSess.InputChannel, bSess.Context, targetURL, allowKeyboard)
 
-	// Start the screencast → VP8 → RTP pipeline.
-	if err := video.StartPipeline(bSess.Context, rtcSess.VideoTrack, bSess); err != nil {
+	// Start the screencast → encode → RTP pipeline with the resolved codec.
+	if err := video.StartPipeline(bSess.Context, rtcSess.VideoTrack, bSess, codec); err != nil {
 		bSess.Close()
 		return nil, err
 	}
@@ -320,8 +342,41 @@ func startRender(
 		"viewport_w", width,
 		"viewport_h", height,
 		"allow_keyboard", allowKeyboard,
+		"codec", codec.String(),
 	)
 	return bSess, nil
+}
+
+// resolveVideoCodec maps the admin-configured video encoder mode to the codec a
+// session encodes to, consulting video.H264Available (a real, cached VAAPI
+// encoder probe — not just render-node presence):
+//   - Cpu  → always VP8 (software).
+//   - Gpu  → H.264 if hardware is usable; otherwise an error (fail loudly).
+//   - Auto → H.264 if hardware is usable, else VP8.
+//
+// On any DB read error the mode defaults to Auto (matching VideoEncoderStore),
+// so a settings glitch degrades to the safe software path rather than failing.
+func resolveVideoCodec(store *settings.VideoEncoderStore) (video.Codec, error) {
+	mode, err := store.GetMode()
+	if err != nil {
+		slog.Warn("session offer: read video encoder mode, defaulting to Auto", "err", err)
+		mode = db.VideoEncoderModeAuto
+	}
+
+	switch mode {
+	case db.VideoEncoderModeCpu:
+		return video.CodecVP8, nil
+	case db.VideoEncoderModeGpu:
+		if !video.H264Available() {
+			return 0, fmt.Errorf("video encoder mode is Gpu but no usable VAAPI H.264 encoder is available")
+		}
+		return video.CodecH264, nil
+	default: // Auto
+		if video.H264Available() {
+			return video.CodecH264, nil
+		}
+		return video.CodecVP8, nil
+	}
 }
 
 // clampViewport returns the requested dimension clamped to [minimum, maximum].

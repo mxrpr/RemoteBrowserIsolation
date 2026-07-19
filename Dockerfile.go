@@ -8,11 +8,14 @@ FROM golang:1.26-bookworm AS build
 
 # libvpx-dev: cgo headers needed at compile time for -tags vpx (encoder_vpx.go).
 # libturbojpeg0-dev: cgo headers for the -tags vpx JPEG decoder
-# (decoder_turbojpeg.go). The runtime .so's are installed separately in the
-# final stage; only headers are needed here, but these -dev packages also
-# pull in the runtime libs which doesn't hurt.
+# (decoder_turbojpeg.go).
+# libavcodec-dev + libavutil-dev: cgo headers for the -tags vpx VAAPI H.264
+# encoder (encoder_vaapi.go), which links -lavcodec -lavutil.
+# The runtime .so's are installed separately in the final stage; only headers
+# are needed here, but these -dev packages also pull in the runtime libs which
+# doesn't hurt.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        libvpx-dev libturbojpeg0-dev \
+        libvpx-dev libturbojpeg0-dev libavcodec-dev libavutil-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
@@ -34,14 +37,34 @@ FROM debian:bookworm-slim
 # libvpx7: runtime shared library for the VP8 encoder compiled with -tags vpx.
 # libturbojpeg0: runtime shared library for the JPEG decoder compiled with
 #   -tags vpx (decoder_turbojpeg.go).
+# libavcodec59 + libavutil57: runtime shared libraries for the VAAPI H.264
+#   encoder (encoder_vaapi.go).
+# libva2: VAAPI client runtime. intel-media-va-driver-non-free: the Intel "iHD"
+#   driver required for Iris Xe (Gen12) hardware H.264 encode — the older i965
+#   driver does not cover it. It lives in Debian's non-free component, enabled
+#   just below. vainfo: diagnostics (`vainfo` lists the driver's encode entrypoints).
 # chromium: headless Chromium binary for video-mode CDP sessions via chromedp.
 #   chromedp auto-detects "chromium" in PATH — no RBI_BROWSER_CHROMIUM_PATH override needed.
 # ca-certificates: needed for TLS verification in outbound proxy connections.
 # --no-install-recommends: avoids pulling in the full X11/desktop stack that
 #   the chromium package recommends but that headless operation does not require.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        libvpx7 libturbojpeg0 chromium ca-certificates \
+#
+# The sed enables the non-free + contrib components in Bookworm's deb822 sources
+# so intel-media-va-driver-non-free is installable.
+RUN sed -i 's/^Components: main$/Components: main contrib non-free non-free-firmware/' \
+        /etc/apt/sources.list.d/debian.sources \
+    && apt-get update && apt-get install -y --no-install-recommends \
+        libvpx7 libturbojpeg0 libavcodec59 libavutil57 \
+        libva2 intel-media-va-driver-non-free vainfo \
+        chromium ca-certificates \
     && rm -rf /var/lib/apt/lists/*
+
+# LIBVA_DRIVER_NAME=iHD selects the Intel media driver installed above (Iris Xe).
+# The VAAPI render node itself must be passed into the container at run time:
+#   docker run --device /dev/dri/renderD128 ...
+# (added in run_docker_go.sh). Without the device, H264Available() returns false
+# and the pipeline falls back to software VP8 in Auto mode.
+ENV LIBVA_DRIVER_NAME=iHD
 
 COPY --from=build /out/server /app/server
 

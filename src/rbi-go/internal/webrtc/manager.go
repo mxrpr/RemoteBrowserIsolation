@@ -22,6 +22,7 @@ import (
 	"regexp"
 
 	"rbi-go/internal/config"
+	"rbi-go/internal/video"
 
 	pion "github.com/pion/webrtc/v3"
 )
@@ -107,7 +108,7 @@ func NewManager(cfg *config.WebRtcConfig) *Manager {
 //
 // ctx is used only to bound the ICE-gathering wait; cancelling it closes the
 // peer connection and returns an error.
-func (m *Manager) CreateSession(ctx context.Context, offerSDP string) (answerSDP string, sess *Session, err error) {
+func (m *Manager) CreateSession(ctx context.Context, offerSDP string, codec video.Codec) (answerSDP string, sess *Session, err error) {
 	// Build the pion API with a SettingEngine that pins ICE/RTP UDP sockets to
 	// the configured port range. Without this, pion picks ephemeral OS ports
 	// that can't be statically published in a Docker container.
@@ -146,23 +147,32 @@ func (m *Manager) CreateSession(ctx context.Context, offerSDP string) (answerSDP
 		}
 	}()
 
-	// Create the VP8 send-only track. This must be added via
-	// AddTransceiverFromTrack before SetRemoteDescription so the SDP answer
-	// includes a sendonly video section that pairs with the browser's recvonly
-	// section. Mirrors C# addTrack(videoTrack) before setRemoteDescription.
-	videoTrack, err := pion.NewTrackLocalStaticSample(
-		pion.RTPCodecCapability{MimeType: pion.MimeTypeVP8},
-		vp8TrackID,
-		vp8StreamID,
-	)
+	// Create the send-only video track with the resolved codec. This must be
+	// added via AddTransceiverFromTrack before SetRemoteDescription so the SDP
+	// answer includes a sendonly video section that pairs with the browser's
+	// recvonly section. Mirrors C# addTrack(videoTrack) before setRemoteDescription.
+	//
+	// The track codec MUST match the encoder the pipeline will use for this
+	// session (both are derived from the same resolved Codec) — otherwise the
+	// browser is offered one codec and fed another codec's bitstream. For H.264
+	// the fmtp line pins Constrained Baseline (profile-level-id=42e01f),
+	// packetization-mode=1 (matches pion's H.264 payloader and what browsers offer).
+	capability := pion.RTPCodecCapability{MimeType: pion.MimeTypeVP8}
+	if codec == video.CodecH264 {
+		capability = pion.RTPCodecCapability{
+			MimeType:    pion.MimeTypeH264,
+			SDPFmtpLine: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f",
+		}
+	}
+	videoTrack, err := pion.NewTrackLocalStaticSample(capability, vp8TrackID, vp8StreamID)
 	if err != nil {
-		return "", nil, fmt.Errorf("webrtc: new VP8 track: %w", err)
+		return "", nil, fmt.Errorf("webrtc: new %s track: %w", codec, err)
 	}
 
 	if _, err = pc.AddTransceiverFromTrack(videoTrack, pion.RTPTransceiverInit{
 		Direction: pion.RTPTransceiverDirectionSendonly,
 	}); err != nil {
-		return "", nil, fmt.Errorf("webrtc: add VP8 transceiver: %w", err)
+		return "", nil, fmt.Errorf("webrtc: add %s transceiver: %w", codec, err)
 	}
 
 	// Create the pre-negotiated data channel before SetRemoteDescription.

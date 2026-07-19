@@ -256,7 +256,7 @@ func buildRouter(
 	// WebRTC video session — POST /api/session/offer.
 	// Accepts the browser's SDP offer, re-resolves policy, negotiates the answer,
 	// and wires the screencast + input pipeline once the connection is established.
-	mux.HandleFunc("POST /api/session/offer", handleSessionOffer(eng, webrtcMgr, browserMgr))
+	mux.HandleFunc("POST /api/session/offer", handleSessionOffer(eng, webrtcMgr, browserMgr, videoStore))
 
 	// Static file serving for wwwroot/ — mirrors UseDefaultFiles() + UseStaticFiles()
 	// in the C# Program.cs: index.html is served for GET /, and every file under
@@ -369,7 +369,7 @@ func run() error {
 	// minter. httpServerAddr is passed so the proxy can (a) connect back to the
 	// HTTP server for self-origin bypass, and (b) embed the correct URL in the
 	// video-mode interstitial link.
-	proxyServer := proxy.NewServer(&cfg.Proxy, ln.Addr().String(), eng, caMinter)
+	proxyServer := proxy.NewServer(&cfg.Proxy, ln.Addr().String(), cfg.WebRtc.AdvertisedIp, eng, caMinter)
 
 	// Graceful shutdown on SIGINT/SIGTERM. A cancellable context is used to
 	// signal both the HTTP server (via srv.Shutdown) and the proxy listener

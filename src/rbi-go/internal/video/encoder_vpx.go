@@ -41,7 +41,13 @@ vpx_codec_ctx_t* vpxEncCreate(int width, int height, int bitrate_kbps, char* err
     cfg.rc_min_quantizer = 4;
     cfg.rc_max_quantizer = 56;
     cfg.g_lag_in_frames = 0;             // no lookahead — zero extra latency
-    cfg.g_threads = 0;                   // 0 = auto (libvpx picks cpu_count)
+    // g_threads is deliberately pinned to 1, not left at libvpx's own default.
+    // libvpx does NOT auto-detect cpu_count -- thread count is whatever the
+    // caller supplies, and VP8 only parallelizes across token partitions. One
+    // session = one encoder = one thread keeps N concurrent sessions mapped to
+    // N cores; leaving this unset/higher would oversubscribe the scheduler as
+    // session count grows.
+    cfg.g_threads = 1;
     cfg.rc_end_usage = VPX_CBR;          // constant bitrate for streaming
 
     vpx_codec_ctx_t* ctx = (vpx_codec_ctx_t*)calloc(1, sizeof(vpx_codec_ctx_t));
@@ -129,12 +135,13 @@ import (
 )
 
 const (
-	// vpxTargetBitrateKbps is the CBR target (6 Mbit/s), raised from the C#
-	// VideoTrackStreamer's 3 Mbit/s to match the 1080p viewport cap.
-	vpxTargetBitrateKbps = 6000
+	// vpxTargetBitrateKbps is the CBR target, reverted to the C# VideoTrackStreamer's
+	// 3 Mbit/s alongside the 720p viewport cap reversion in cmd/server/session.go
+	// (see that constant's comment for the concurrent-session capacity tradeoff).
+	vpxTargetBitrateKbps = 3000
 
-	// vpxOutputBufSize is the maximum encoded frame size we allocate. A 1920×1080
-	// keyframe at 6 Mbit/s is typically <150 KB; 1 MB provides a generous margin.
+	// vpxOutputBufSize is the maximum encoded frame size we allocate. A 1280×720
+	// keyframe at 3 Mbit/s is typically well under this; 1 MB provides a generous margin.
 	vpxOutputBufSize = 1024 * 1024
 
 	// vpxErrBufSize is the size of the C error string buffer used by vpxEncCreate
@@ -142,7 +149,7 @@ const (
 	vpxErrBufSize = 512
 )
 
-// vpxEncoder implements VP8Encoder using libvpx via cgo. One instance per
+// vpxEncoder implements VideoEncoder using libvpx via cgo. One instance per
 // session; not thread-safe (owned by a single transcode goroutine).
 type vpxEncoder struct {
 	// ctx is the heap-allocated vpx_codec_ctx_t. Freed in Close.
@@ -156,6 +163,11 @@ type vpxEncoder struct {
 	// malloc/free on every Encode call.
 	outBuf *C.uint8_t
 
+	// errBuf is a reusable C-heap buffer for libvpx error strings, avoiding a
+	// malloc/free pair (plus two cgo call transitions) on every Encode call —
+	// it's only ever read on the (rare) error path.
+	errBuf *C.char
+
 	// closed indicates Close has been called. Subsequent Encode calls return an error.
 	closed bool
 }
@@ -163,7 +175,7 @@ type vpxEncoder struct {
 // NewVP8Encoder creates a VP8 encoder sized for frames of the given dimensions.
 // The encoder is tuned for real-time screen capture (CBR, realtime deadline,
 // no lookahead). Returns an error if libvpx cannot be initialised.
-func NewVP8Encoder(width, height int) (VP8Encoder, error) {
+func NewVP8Encoder(width, height int) (VideoEncoder, error) {
 	errBuf := (*C.char)(C.malloc(vpxErrBufSize))
 	defer C.free(unsafe.Pointer(errBuf))
 
@@ -173,8 +185,9 @@ func NewVP8Encoder(width, height int) (VP8Encoder, error) {
 	}
 
 	outBuf := (*C.uint8_t)(C.malloc(vpxOutputBufSize))
+	encErrBuf := (*C.char)(C.malloc(vpxErrBufSize))
 
-	return &vpxEncoder{ctx: ctx, outBuf: outBuf}, nil
+	return &vpxEncoder{ctx: ctx, outBuf: outBuf, errBuf: encErrBuf}, nil
 }
 
 // Encode encodes one I420 frame to VP8. yuvI420 must be a packed I420 buffer
@@ -204,21 +217,18 @@ func (e *vpxEncoder) Encode(yuvI420 []byte, width, height int, forceKeyFrame boo
 		flags = C.VPX_EFLAG_FORCE_KF
 	}
 
-	errBuf := (*C.char)(C.malloc(vpxErrBufSize))
-	defer C.free(unsafe.Pointer(errBuf))
-
 	n := C.vpxEncodeFrame(
 		e.ctx,
 		yPtr, uPtr, vPtr,
 		C.int(width), C.int(height),
 		e.pts, flags,
 		e.outBuf, C.int(vpxOutputBufSize),
-		errBuf, C.int(vpxErrBufSize),
+		e.errBuf, C.int(vpxErrBufSize),
 	)
 	e.pts++
 
 	if n < 0 {
-		return nil, fmt.Errorf("video: VP8 encode: %s", C.GoString(errBuf))
+		return nil, fmt.Errorf("video: VP8 encode: %s", C.GoString(e.errBuf))
 	}
 	if n == 0 {
 		return nil, nil
@@ -242,5 +252,9 @@ func (e *vpxEncoder) Close() {
 	if e.outBuf != nil {
 		C.free(unsafe.Pointer(e.outBuf))
 		e.outBuf = nil
+	}
+	if e.errBuf != nil {
+		C.free(unsafe.Pointer(e.errBuf))
+		e.errBuf = nil
 	}
 }

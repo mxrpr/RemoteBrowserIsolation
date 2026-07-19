@@ -9,6 +9,7 @@ import (
 	pion "github.com/pion/webrtc/v3"
 
 	"rbi-go/internal/config"
+	"rbi-go/internal/video"
 )
 
 // === Tier 1: SDP Rewrite Function Tests ===
@@ -276,7 +277,7 @@ func TestManager_CreateSession_ReturnedAnswerSDP_NonEmpty(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	answerSDP, sess, err := m.CreateSession(ctx, offerSDP)
+	answerSDP, sess, err := m.CreateSession(ctx, offerSDP, video.CodecVP8)
 	if err != nil {
 		t.Fatalf("CreateSession failed: %v", err)
 	}
@@ -307,7 +308,7 @@ func TestManager_CreateSession_ReturnedAnswerSDP_Parseable(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	answerSDP, sess, err := m.CreateSession(ctx, offerSDP)
+	answerSDP, sess, err := m.CreateSession(ctx, offerSDP, video.CodecVP8)
 	if err != nil {
 		t.Fatalf("CreateSession failed: %v", err)
 	}
@@ -340,7 +341,7 @@ func TestManager_CreateSession_AnswerContainsVideoSection(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	answerSDP, sess, err := m.CreateSession(ctx, offerSDP)
+	answerSDP, sess, err := m.CreateSession(ctx, offerSDP, video.CodecVP8)
 	if err != nil {
 		t.Fatalf("CreateSession failed: %v", err)
 	}
@@ -371,7 +372,7 @@ func TestManager_CreateSession_DataChannelID1_Negotiated(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	answerSDP, sess, err := m.CreateSession(ctx, offerSDP)
+	answerSDP, sess, err := m.CreateSession(ctx, offerSDP, video.CodecVP8)
 	if err != nil {
 		t.Fatalf("CreateSession failed: %v", err)
 	}
@@ -419,7 +420,7 @@ func TestManager_CreateSession_ICEConnectionReachesConnected(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	answerSDP, sess, err := m.CreateSession(ctx, offerSDP)
+	answerSDP, sess, err := m.CreateSession(ctx, offerSDP, video.CodecVP8)
 	if err != nil {
 		t.Fatalf("CreateSession failed: %v", err)
 	}
@@ -468,7 +469,7 @@ func TestManager_CreateSession_SessionFields_NotNil(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	_, sess, err := m.CreateSession(ctx, offerSDP)
+	_, sess, err := m.CreateSession(ctx, offerSDP, video.CodecVP8)
 	if err != nil {
 		t.Fatalf("CreateSession failed: %v", err)
 	}
@@ -505,7 +506,7 @@ func TestManager_CreateSession_AdvertisedIPRewrittenInAnswer(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	answerSDP, sess, err := m.CreateSession(ctx, offerSDP)
+	answerSDP, sess, err := m.CreateSession(ctx, offerSDP, video.CodecVP8)
 	if err != nil {
 		t.Fatalf("CreateSession failed: %v", err)
 	}
@@ -536,7 +537,7 @@ func TestManager_CreateSession_EmptyAdvertisedIP_CandidatesPresent(t *testing.T)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	answerSDP, sess, err := m.CreateSession(ctx, offerSDP)
+	answerSDP, sess, err := m.CreateSession(ctx, offerSDP, video.CodecVP8)
 	if err != nil {
 		t.Fatalf("CreateSession failed: %v", err)
 	}
@@ -569,7 +570,7 @@ func TestManager_CreateSession_ContextCancelled_ReturnsError(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	answerSDP, sess, err := m.CreateSession(ctx, offerSDP)
+	answerSDP, sess, err := m.CreateSession(ctx, offerSDP, video.CodecVP8)
 
 	if err == nil {
 		t.Error("expected error with cancelled context")
@@ -597,7 +598,7 @@ func TestManager_CreateSession_InvalidPortRange_ReturnsError(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	answerSDP, sess, err := m.CreateSession(ctx, offerSDP)
+	answerSDP, sess, err := m.CreateSession(ctx, offerSDP, video.CodecVP8)
 
 	if err == nil {
 		t.Error("expected error with invalid port range")

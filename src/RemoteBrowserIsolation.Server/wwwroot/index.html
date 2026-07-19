@@ -301,11 +301,16 @@
         await pc.setLocalDescription(offer);
         await waitForIceGatheringComplete(pc);
 
-        // Request a render size matching the video element's on-screen area, scaled down
-        // (preserving aspect ratio) to fit the server's 1280x720 cap. object-fit: contain
-        // letterboxes any residual mismatch instead of stretching.
-        const availW = video.clientWidth;
-        const availH = video.clientHeight;
+        // Request a render size matching the video element's on-screen area in
+        // physical pixels (CSS size * devicePixelRatio) so HiDPI displays get a
+        // sharp stream instead of one sized to CSS pixels, then scaled down
+        // (preserving aspect ratio) to fit the server's 1280x720 cap (reverted
+        // from 1920x1080 — see cmd/server/session.go's maxViewportWidth comment
+        // for the concurrent-session capacity tradeoff behind this).
+        // object-fit: contain letterboxes any residual mismatch instead of stretching.
+        const dpr = window.devicePixelRatio || 1;
+        const availW = video.clientWidth * dpr;
+        const availH = video.clientHeight * dpr;
         const fit = Math.min(1280 / availW, 720 / availH, 1);
         const reqW = Math.round(availW * fit);
         const reqH = Math.round(availH * fit);

@@ -6,8 +6,10 @@
 # directory without collision.
 #
 # RBI_WEBRTC_ADVERTISED_IP overrides the WebRTC answer SDP's host candidate IP
-# for setups where the browser isn't on the same machine as the container
-# (default: 127.0.0.1, i.e. browser + container on one machine via loopback).
+# for setups where the browser isn't on the same machine as the container.
+# Defaults to this host's LAN IP (192.168.0.128) rather than 127.0.0.1 so
+# remote machines on the LAN can connect out of the box; override for other
+# networks/IPs.
 #
 # RBI_SELF_HOST adds an extra hostname/IP to the proxy's self-host list. Unlike
 # the C# container (which appends via ASP.NET Core's array-index env var trick),
@@ -35,24 +37,25 @@ RUN_ARGS=(
     --rm -it
     --shm-size=1g
     -v "$ROOT/data:/app/data"
-    -e "RBI_WEBRTC_ADVERTISED_IP=${RBI_WEBRTC_ADVERTISED_IP:-127.0.0.1}"
+    -e "RBI_WEBRTC_ADVERTISED_IP=${RBI_WEBRTC_ADVERTISED_IP:-192.168.0.128}"
+    -e "RBI_PROXY_SELF_HOSTS=localhost,127.0.0.1,${RBI_SELF_HOST:-192.168.0.128}"
     --name rbi-go
 )
 
 if [[ "$(uname -s)" == "Linux" ]]; then
     RUN_ARGS+=(--network host)
+    # Pass the VAAPI render node through for hardware H.264 encode (Iris Xe).
+    # Only added when present so the script still works on GPU-less hosts, where
+    # the server's Auto mode simply falls back to software VP8.
+    if [[ -e /dev/dri/renderD128 ]]; then
+        RUN_ARGS+=(--device /dev/dri/renderD128)
+    fi
 else
     RUN_ARGS+=(
         -p 5139:5139
         -p 8080:8080
         -p 40000-40009:40000-40009/udp
     )
-fi
-
-if [[ -n "${RBI_SELF_HOST:-}" ]]; then
-    # Provide the full self-host list including the defaults, since RBI_PROXY_SELF_HOSTS
-    # replaces rather than appends (unlike the C# Proxy__SelfHosts__2 index trick).
-    RUN_ARGS+=(-e "RBI_PROXY_SELF_HOSTS=localhost,127.0.0.1,${RBI_SELF_HOST}")
 fi
 
 docker run "${RUN_ARGS[@]}" rbi-go:latest

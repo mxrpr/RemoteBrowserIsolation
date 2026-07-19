@@ -28,7 +28,9 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/chromedp/cdproto/inspector"
 	"github.com/chromedp/cdproto/page"
+	"github.com/chromedp/cdproto/target"
 	"github.com/chromedp/chromedp"
 
 	"rbi-go/internal/config"
@@ -188,11 +190,25 @@ func (m *Manager) CreateSession(ctx context.Context, viewportWidth, viewportHeig
 	//   Chrome's SUID/namespace sandbox cannot operate as UID 0 and exits with
 	//   SIGSEGV on the sandbox helper without this flag.
 	//
+	// --disable-gpu / --disable-software-rasterizer: without these, headless
+	// Chrome still spins up a GPU process doing SwiftShader software rendering
+	// per session -- real CPU cost with no visible-output benefit here (video
+	// is captured via Page.startScreencast, not a GPU-composited surface).
+	//
+	// --mute-audio: no audio track is ever consumed, skip the mixing cost.
+	//
+	// --renderer-process-limit=1: one tab per session -- cap Chrome to the one
+	// renderer process it actually needs instead of its default pooling.
+	//
 	// --user-data-dir: Unique per session; see tmpDir comment above.
 	defaults := chromedp.DefaultExecAllocatorOptions
-	opts := make([]chromedp.ExecAllocatorOption, len(defaults), len(defaults)+3)
+	opts := make([]chromedp.ExecAllocatorOption, len(defaults), len(defaults)+7)
 	copy(opts, defaults[:])
 	opts = append(opts, chromedp.Flag("no-sandbox", true))
+	opts = append(opts, chromedp.Flag("disable-gpu", true))
+	opts = append(opts, chromedp.Flag("disable-software-rasterizer", true))
+	opts = append(opts, chromedp.Flag("mute-audio", true))
+	opts = append(opts, chromedp.Flag("renderer-process-limit", "1"))
 	opts = append(opts, chromedp.UserDataDir(tmpDir))
 	if m.cfg.ChromiumPath != "" {
 		opts = append(opts, chromedp.ExecPath(m.cfg.ChromiumPath))
@@ -205,7 +221,15 @@ func (m *Manager) CreateSession(ctx context.Context, viewportWidth, viewportHeig
 	// c.first == true here, so chromedp waits for Chrome's initial "about:blank"
 	// tab rather than trying Target.createBrowserContext (which is broken in
 	// Chrome 150 new headless mode).
-	sessCtx, sessCancel := chromedp.NewContext(allocCtx)
+	// DIAGNOSTIC: route chromedp's internal error channel (CDP protocol errors,
+	// browser-connection failures) into slog so failures like a renderer crash or
+	// a dropped DevTools connection are visible instead of silently surfacing much
+	// later as a bare "-32000 Not attached to an active page" on the next command.
+	sessCtx, sessCancel := chromedp.NewContext(allocCtx,
+		chromedp.WithErrorf(func(format string, args ...any) {
+			slog.Warn("chromedp error: "+fmt.Sprintf(format, args...), "url", targetURL)
+		}),
+	)
 
 	// Track whether setup succeeds so the cleanup defer can decide what to do.
 	setupOK := false
@@ -234,6 +258,26 @@ func (m *Manager) CreateSession(ctx context.Context, viewportWidth, viewportHeig
 	if err = chromedp.Run(sessCtx); err != nil {
 		return nil, fmt.Errorf("browser: allocate Chrome for %q: %w", targetURL, err)
 	}
+
+	// DIAGNOSTIC: catch renderer/page crashes for this session's target explicitly.
+	// Inspector.targetCrashed fires when the renderer process for the attached page
+	// dies (OOM, sad-tab, GPU fault). If this fires between navigation and
+	// StartScreencast it explains the "-32000 Not attached to an active page" the
+	// load test hit — a dead renderer, not a bad attach in our code.
+	chromedp.ListenTarget(sessCtx, func(ev any) {
+		switch e := ev.(type) {
+		case *inspector.EventTargetCrashed:
+			slog.Error("browser: renderer target CRASHED", "url", targetURL)
+		case *inspector.EventDetached:
+			slog.Warn("browser: inspector DETACHED", "url", targetURL, "reason", e.Reason)
+		case *target.EventTargetDestroyed:
+			slog.Warn("browser: target DESTROYED", "url", targetURL, "targetID", e.TargetID.String())
+		case *target.EventTargetCreated:
+			if e.TargetInfo != nil && e.TargetInfo.Type == "page" {
+				slog.Warn("browser: NEW page target created", "url", targetURL, "targetID", e.TargetInfo.TargetID.String(), "targetURL", e.TargetInfo.URL)
+			}
+		}
+	})
 
 	// Phase 2: run setup actions (viewport + navigation) with a cancellable
 	// child context so that the caller's ctx deadline/cancellation aborts the
